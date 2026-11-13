@@ -26,6 +26,7 @@ import com.kscanner.ui.EditorViewModel
 import com.kscanner.ui.LibraryViewModel
 import com.kscanner.ui.SettingsViewModel
 import com.kscanner.ui.camera.CameraScreen
+import com.kscanner.ui.capture.ScanSessionViewModel
 import com.kscanner.ui.document.DocumentScreen
 import com.kscanner.ui.editor.EditorScreen
 import com.kscanner.ui.library.LibraryScreen
@@ -105,10 +106,19 @@ private fun KScannerNavHost() {
             ),
         ) { entry ->
             val documentId = entry.arguments?.getLong("documentId")?.takeIf { it >= 0 }
+            val session: ScanSessionViewModel = viewModel(factory = factory)
+            val settings by app.container.settings.state.collectAsStateWithLifecycle()
             CameraScreen(
                 documentId = documentId,
+                initialMode = settings.scanMode,
+                session = session,
                 onCaptured = { path ->
                     navController.navigate(Routes.editor(path, documentId))
+                },
+                onFinished = { id ->
+                    // Collapse the capture chain so Back from the document returns to the library.
+                    navController.popBackStack(Routes.LIBRARY, inclusive = false)
+                    navController.navigate(Routes.document(id))
                 },
                 onClose = { navController.popBackStack() },
             )

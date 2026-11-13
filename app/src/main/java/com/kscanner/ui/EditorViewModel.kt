@@ -7,12 +7,17 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.kscanner.core.imaging.AutoCrop
 import com.kscanner.core.imaging.BitmapBridge
+import com.kscanner.core.imaging.CaptureAdvice
+import com.kscanner.core.imaging.DetectMethod
 import com.kscanner.core.imaging.DocDetector
+import com.kscanner.core.imaging.Filters
 import com.kscanner.core.imaging.Quad
 import com.kscanner.core.imaging.RgbaImage
 import com.kscanner.core.imaging.ScanFilter
 import com.kscanner.core.imaging.ScanProcessor
+import com.kscanner.core.imaging.Skew
 import com.kscanner.core.imaging.Transforms
 import com.kscanner.data.ScanRepository
 import com.kscanner.data.SettingsStore
@@ -83,6 +88,25 @@ class EditorViewModel(
     var autoDetected by mutableStateOf(false)
         private set
 
+    /** Residual text skew of the cropped page, in degrees (clockwise positive). */
+    var deskewDegrees by mutableStateOf(0.0)
+        private set
+
+    /** How the outline was found, for the status line. Null when it was not detected. */
+    var detectionMethod by mutableStateOf<DetectMethod?>(null)
+        private set
+
+    var detectionConfidence by mutableStateOf(0.0)
+        private set
+
+    /** What the capture's own measurements say about it. */
+    var advice by mutableStateOf(CaptureAdvice.GOOD)
+        private set
+
+    /** True while an automatic pass is running, so the UI can show a progress hint. */
+    var analysing by mutableStateOf(false)
+        private set
+
     private var original: RgbaImage? = null
     private var previewImage: RgbaImage? = null
     private var sourcePath: String? = null
@@ -94,6 +118,7 @@ class EditorViewModel(
         if (sourcePath == path && original != null) return
         sourcePath = path
         loading = true
+        analysing = true
         error = null
         viewModelScope.launch {
             val decoded = withContext(Dispatchers.Default) {
@@ -102,6 +127,7 @@ class EditorViewModel(
             if (decoded == null) {
                 error = "That image could not be opened."
                 loading = false
+                analysing = false
                 return@launch
             }
             original = decoded
@@ -111,10 +137,62 @@ class EditorViewModel(
             brightness = 0f
             contrast = 0f
             sharpness = 0f
-            refreshPreview(detect = true)
+            runAutoPass(applyStyle = true)
             loading = false
+            analysing = false
         }
     }
+
+    // ------------------------------------------------------------ automatic pass
+
+    /**
+     * Runs the whole automatic preparation on the untouched capture: make it upright, find
+     * the outline, measure the residual skew and the frame quality. When [applyStyle] is
+     * set the enhancement preset is also chosen from the frame's own measurements.
+     */
+    private suspend fun runAutoPass(applyStyle: Boolean) {
+        val source = original ?: return
+        val prepared = withContext(Dispatchers.Default) {
+            val plan = AutoCrop.plan(
+                source,
+                workingEdge = 1080,
+                fixOrientation = settingsStore.current.autoRotate,
+            )
+            val rotated = Transforms.rotate(source, plan.rotationDegrees)
+            val rotatedQuad = plan.quad
+            val preview = Transforms.fitLongestEdge(rotated, 1080)
+            if (applyStyle && settingsStore.current.autoFilter) {
+                val upright = Transforms.fitLongestEdge(rotated, 1080)
+                filter = Filters.auto(upright)
+            }
+            Prepared(plan, rotatedQuad, preview)
+        }
+
+        rotation = prepared.plan.rotationDegrees
+        deskewDegrees = if (settingsStore.current.autoDeskew) prepared.plan.deskewDegrees else 0.0
+        detectionMethod = prepared.plan.method
+        detectionConfidence = prepared.plan.confidence
+        advice = prepared.plan.quality.advice
+        previewImage = prepared.preview
+
+        val quad = prepared.quad
+        quadNorm = if (quad != null) {
+            quad.scaled(1.0 / prepared.preview.width, 1.0 / prepared.preview.height)
+        } else {
+            Quad.rect(1.0, 1.0).insetBy(0.025)
+        }
+        autoDetected = quad != null
+
+        previewBitmap = withContext(Dispatchers.Default) {
+            BitmapBridge.toBitmap(prepared.preview).asImageBitmap()
+        }
+    }
+
+    private class Prepared(
+        val plan: AutoCrop.Plan,
+        val quad: Quad?,
+        val preview: RgbaImage,
+    )
 
     // ------------------------------------------------------------ crop stage
 
@@ -138,29 +216,50 @@ class EditorViewModel(
 
             rotation = nextRotation
             quadNorm = movedQuad
-            refreshPreview(detect = false)
+            refreshPreview(detect = false, remeasureSkew = true)
             loading = false
         }
     }
 
+    /** Re-runs detection and the orientation decision on the current capture. */
     fun autoDetect() {
-        val image = original ?: return
+        if (original == null) return
         viewModelScope.launch {
             loading = true
-            val found = withContext(Dispatchers.Default) {
-                val preview = previewImage ?: Transforms.fitLongestEdge(
-                    Transforms.rotate(image, rotation),
-                    1080,
-                )
-                DocDetector.detect(preview)
-            }
-            if (found != null && previewImage != null) {
-                val p = previewImage!!
-                quadNorm = found.quad.scaled(1.0 / p.width, 1.0 / p.height)
-                autoDetected = true
-            }
+            analysing = true
+            runAutoPass(applyStyle = false)
+            analysing = false
             loading = false
         }
+    }
+
+    /** Chooses the enhancement preset from the page's own measurements. */
+    fun autoEnhance() {
+        val source = original ?: return
+        viewModelScope.launch {
+            val chosen = withContext(Dispatchers.Default) {
+                Filters.auto(Transforms.fitLongestEdge(Transforms.rotate(source, rotation), 1080))
+            }
+            filter = chosen
+            if (stage == Stage.FILTER) recomputeResult()
+        }
+    }
+
+    /** Re-measures the residual skew of the cropped page and applies it. */
+    fun autoDeskew() {
+        if (original == null) return
+        viewModelScope.launch {
+            loading = true
+            val measured = withContext(Dispatchers.Default) { measureSkew() }
+            deskewDegrees = measured
+            if (stage == Stage.FILTER) recomputeResult()
+            loading = false
+        }
+    }
+
+    fun clearDeskew() {
+        deskewDegrees = 0.0
+        if (stage == Stage.FILTER) recomputeResult()
     }
 
     fun resetQuadToFrame() {
@@ -243,7 +342,12 @@ class EditorViewModel(
 
     // ------------------------------------------------------------ shared
 
-    private suspend fun refreshPreview(detect: Boolean) {
+    /**
+     * Rebuilds the preview after the user turns the picture. Detection is skipped (the
+     * outline travels with the pixels), but the skew is re-measured because a quarter turn
+     * changes which way the text leans.
+     */
+    private suspend fun refreshPreview(detect: Boolean, remeasureSkew: Boolean = false) {
         val source = original ?: return
         val rendered = withContext(Dispatchers.Default) {
             val rotated = Transforms.rotate(source, rotation)
@@ -253,9 +357,10 @@ class EditorViewModel(
             } else {
                 null
             }
-            preview to detected
+            val skew = if (remeasureSkew) measureSkew() else null
+            Triple(preview, detected, skew)
         }
-        val (preview, found) = rendered
+        val (preview, found, skew) = rendered
         previewImage = preview
 
         if (detect) {
@@ -263,10 +368,34 @@ class EditorViewModel(
                 ?: Quad.rect(1.0, 1.0).insetBy(0.025)
             autoDetected = found != null
         }
+        if (skew != null) deskewDegrees = skew
 
         previewBitmap = withContext(Dispatchers.Default) {
             BitmapBridge.toBitmap(preview).asImageBitmap()
         }
+    }
+
+    /**
+     * Skew of the text inside the current outline. Measuring it on the cropped page rather
+     * than the whole frame keeps background edges out of the vote.
+     */
+    private fun measureSkew(): Double {
+        val source = original ?: return 0.0
+        val rotated = Transforms.rotate(source, rotation)
+        val rotatedWidth = rotated.width
+        val rotatedHeight = rotated.height
+        val quad = if (quadNorm.area() >= 0.999) {
+            null
+        } else {
+            quadNorm.scaled(rotatedWidth.toDouble(), rotatedHeight.toDouble())
+        }
+        val page = if (quad != null) {
+            runCatching { com.kscanner.core.imaging.Homography.warpPerspective(rotated, quad, 720) }
+                .getOrNull() ?: rotated
+        } else {
+            rotated
+        }
+        return -Skew.estimate(page.toGray()).degrees
     }
 
     /** Outline in pixels of the current preview. */
@@ -284,6 +413,7 @@ class EditorViewModel(
         return ScanProcessor.Settings(
             quad = quadFull,
             rotationDegrees = rotation,
+            deskewDegrees = deskewDegrees,
             filter = filter,
             strength = strength,
             brightness = brightness,

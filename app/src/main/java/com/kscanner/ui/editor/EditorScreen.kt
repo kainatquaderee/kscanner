@@ -67,6 +67,8 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.Image
+import com.kscanner.core.imaging.CaptureAdvice
+import com.kscanner.core.imaging.DetectMethod
 import com.kscanner.core.imaging.Pt
 import com.kscanner.core.imaging.Quad
 import com.kscanner.core.imaging.ScanFilter
@@ -134,6 +136,10 @@ fun EditorScreen(
                     onRotateRight = viewModel::rotateClockwise,
                     onAutoDetect = viewModel::autoDetect,
                     onReset = viewModel::resetQuadToFrame,
+                    onDeskew = viewModel::autoDeskew,
+                    onClearDeskew = viewModel::clearDeskew,
+                    deskewActive = viewModel.deskewDegrees != 0.0,
+                    deskewDegrees = viewModel.deskewDegrees,
                     onNext = viewModel::openFilterStage,
                     enabled = viewModel.previewBitmap != null && !viewModel.loading,
                 )
@@ -144,6 +150,7 @@ fun EditorScreen(
                     strength = viewModel.strength,
                     onStrength = viewModel::updateStrength,
                     saving = viewModel.saving,
+                    onAutoEnhance = viewModel::autoEnhance,
                     onCrop = viewModel::backToCropStage,
                     onSave = { viewModel.save(documentId, onSaved) },
                 )
@@ -164,6 +171,7 @@ fun EditorScreen(
                             quad = viewModel.quadInPreview(bitmap),
                             onMoveCorner = viewModel::moveCorner,
                             autoDetected = viewModel.autoDetected,
+                            statusText = cropStatus(viewModel),
                         )
                     } else {
                         EmptyEditor()
@@ -257,12 +265,38 @@ private fun EmptyEditor() {
 
 // ------------------------------------------------------------------ crop stage
 
+/**
+ * One line explaining what the automatic pass decided, so the crop stage is never a black
+ * box: which cue found the outline, how sure it is, and what is wrong with the shot when
+ * something is.
+ */
+private fun cropStatus(viewModel: EditorViewModel): String {
+    val advice = viewModel.advice
+    if (advice != CaptureAdvice.GOOD) return advice.message
+
+    val method = viewModel.detectionMethod
+        ?: return "Outline not detected — drag the corners onto the page"
+
+    val confidence = when {
+        viewModel.detectionConfidence >= 0.75 -> "high confidence"
+        viewModel.detectionConfidence >= 0.45 -> "medium confidence"
+        else -> "low confidence"
+    }
+    val source = when (method) {
+        DetectMethod.EDGES -> "page edges"
+        DetectMethod.BRIGHT_REGION -> "the bright sheet"
+        DetectMethod.TEXT_BLOCK -> "the text block"
+    }
+    return "Outline from $source, $confidence — drag a corner to fine-tune"
+}
+
 @Composable
 private fun CropStage(
     bitmap: ImageBitmap,
     quad: Quad,
     onMoveCorner: (Int, Double, Double) -> Unit,
     autoDetected: Boolean,
+    statusText: String,
 ) {
     val accent = MaterialTheme.colorScheme.primary
     val error = MaterialTheme.colorScheme.error
@@ -373,8 +407,7 @@ private fun CropStage(
                 )
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    text = if (autoDetected) "Page outline detected — drag a corner to fine-tune"
-                    else "Outline not detected — drag the corners onto the page",
+                    text = statusText,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -389,31 +422,62 @@ private fun CropBar(
     onRotateRight: () -> Unit,
     onAutoDetect: () -> Unit,
     onReset: () -> Unit,
+    onDeskew: () -> Unit,
+    onClearDeskew: () -> Unit,
+    deskewActive: Boolean,
+    deskewDegrees: Double,
     onNext: () -> Unit,
     enabled: Boolean,
 ) {
     Surface(color = MaterialTheme.colorScheme.surface, tonalElevation = 3.dp) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            IconButton(onClick = onRotateLeft) {
-                Icon(Icons.Outlined.RotateLeft, contentDescription = "Rotate left")
+        Column(Modifier.padding(vertical = 6.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = onRotateLeft) {
+                    Icon(Icons.Outlined.RotateLeft, contentDescription = "Rotate left")
+                }
+                IconButton(onClick = onRotateRight) {
+                    Icon(Icons.Outlined.RotateRight, contentDescription = "Rotate right")
+                }
+                IconButton(onClick = onAutoDetect) {
+                    Icon(Icons.Outlined.AutoFixHigh, contentDescription = "Detect automatically")
+                }
+                IconButton(onClick = onReset) {
+                    Icon(Icons.Outlined.CropFree, contentDescription = "Reset outline")
+                }
+                Spacer(Modifier.weight(1f))
+                Button(onClick = onNext, enabled = enabled) {
+                    Text("Next")
+                }
             }
-            IconButton(onClick = onRotateRight) {
-                Icon(Icons.Outlined.RotateRight, contentDescription = "Rotate right")
-            }
-            IconButton(onClick = onAutoDetect) {
-                Icon(Icons.Outlined.AutoFixHigh, contentDescription = "Detect automatically")
-            }
-            IconButton(onClick = onReset) {
-                Icon(Icons.Outlined.CropFree, contentDescription = "Reset outline")
-            }
-            Spacer(Modifier.weight(1f))
-            Button(onClick = onNext, enabled = enabled) {
-                Text("Next")
+
+            // Level the text. The measurement runs on the cropped page, so this is a second
+            // chance to straighten a page whose outline was already right.
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (deskewActive) {
+                    TextButton(onClick = onClearDeskew) {
+                        Text("Undo straighten")
+                    }
+                    Text(
+                        text = "${if (deskewDegrees > 0) "+" else ""}${
+                            String.format("%.1f", deskewDegrees)
+                        }°",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 4.dp),
+                    )
+                } else {
+                    TextButton(onClick = onDeskew) { Text("Straighten text") }
+                }
             }
         }
     }
@@ -428,6 +492,7 @@ private fun FilterBar(
     strength: Float,
     onStrength: (Float) -> Unit,
     saving: Boolean,
+    onAutoEnhance: () -> Unit,
     onCrop: () -> Unit,
     onSave: () -> Unit,
 ) {
@@ -488,6 +553,7 @@ private fun FilterBar(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 TextButton(onClick = onCrop) { Text("Crop") }
+                TextButton(onClick = onAutoEnhance) { Text("Auto") }
                 Spacer(Modifier.weight(1f))
                 Button(onClick = onSave, enabled = !saving) {
                     if (saving) {

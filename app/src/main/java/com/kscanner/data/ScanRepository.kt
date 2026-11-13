@@ -7,6 +7,7 @@ import android.net.Uri
 import androidx.core.content.FileProvider
 import com.kscanner.core.imaging.BitmapBridge
 import com.kscanner.core.imaging.Corners
+import com.kscanner.core.imaging.Quad
 import com.kscanner.core.imaging.RgbaImage
 import com.kscanner.core.imaging.ScanFilter
 import com.kscanner.core.imaging.ScanProcessor
@@ -62,6 +63,78 @@ class ScanRepository(
     // ---------------------------------------------------------------- capture
 
     /**
+     * A page whose pixels are already final. This is the shared currency of every capture
+     * mode: batch writes one per shot, book writes two from one spread, ID card writes one
+     * built from two shots.
+     */
+    class RenderedPage(
+        val image: RgbaImage,
+        /** File kept as the reprocessable original, or null when there is no single source. */
+        val originalPath: String?,
+        val quad: Quad?,
+        val rotation: Int,
+        val filterId: Int,
+    )
+
+    /**
+     * Writes already-rendered pages to a document, creating the document first when
+     * [documentId] is null.
+     *
+     * @return the document id the pages were added to
+     */
+    suspend fun appendPages(
+        documentId: Long?,
+        pages: List<RenderedPage>,
+        documentName: String? = null,
+    ): Long = withContext(Dispatchers.Default) {
+        require(pages.isNotEmpty()) { "nothing to write" }
+
+        val id = documentId ?: withContext(Dispatchers.IO) {
+            store.insertDocument(documentName ?: defaultDocumentName(), null)
+        }
+
+        var index = withContext(Dispatchers.IO) { store.countPages(id) }
+        for (page in pages) {
+            val pageFile = withContext(Dispatchers.IO) { storage.newPageFile(id, "page") }
+            if (!BitmapBridge.saveJpeg(page.image, pageFile, settings.current.jpegQuality)) {
+                throw IllegalStateException("could not write the scanned page")
+            }
+
+            val originalFile = withContext(Dispatchers.IO) {
+                val source = page.originalPath
+                if (settings.current.keepOriginals && source != null) {
+                    val dest = storage.newPageFile(id, "original")
+                    if (BitmapBridge.copyToFile(File(source).inputStream(), dest)) dest else null
+                } else {
+                    null
+                }
+            }
+
+            withContext(Dispatchers.IO) {
+                store.insertPage(
+                    documentId = id,
+                    index = index,
+                    originalPath = (originalFile ?: pageFile).absolutePath,
+                    processedPath = pageFile.absolutePath,
+                    filterId = page.filterId,
+                    rotation = page.rotation,
+                    corners = page.quad?.let { Corners.serialize(it) },
+                    width = page.image.width,
+                    height = page.image.height,
+                )
+            }
+
+            if (settings.current.autoOcr) {
+                runCatching { runOcrForPage(id, index) }
+            }
+            index++
+        }
+
+        withContext(Dispatchers.IO) { refreshThumbnail(id) }
+        id
+    }
+
+    /**
      * Processes a capture and appends it to a document, creating the document first when
      * [documentId] is null.
      *
@@ -73,50 +146,24 @@ class ScanRepository(
         scan: ScanProcessor.Settings,
         documentName: String? = null,
     ): Long = withContext(Dispatchers.Default) {
-        val id = documentId ?: withContext(Dispatchers.IO) {
-            store.insertDocument(documentName ?: defaultDocumentName(), null)
-        }
-
         val sourceFile = File(capturePath)
         val source = BitmapBridge.decodeFile(sourceFile, settings.current.maxImageEdge)
             ?: throw IllegalStateException("capture could not be decoded")
 
         val rendered = ScanProcessor.process(source, scan)
-        val pageFile = withContext(Dispatchers.IO) { storage.newPageFile(id, "page") }
-        if (!BitmapBridge.saveJpeg(rendered, pageFile, settings.current.jpegQuality)) {
-            throw IllegalStateException("could not write the scanned page")
-        }
-
-        val originalFile = withContext(Dispatchers.IO) {
-            if (settings.current.keepOriginals) {
-                val dest = storage.newPageFile(id, "original")
-                if (BitmapBridge.copyToFile(sourceFile.inputStream(), dest)) dest else null
-            } else {
-                null
-            }
-        }
-
-        val index = withContext(Dispatchers.IO) { store.countPages(id) }
-        withContext(Dispatchers.IO) {
-            store.insertPage(
-                documentId = id,
-                index = index,
-                originalPath = (originalFile ?: pageFile).absolutePath,
-                processedPath = pageFile.absolutePath,
-                filterId = scan.filter.id,
-                rotation = scan.rotationDegrees,
-                corners = scan.quad?.let { Corners.serialize(it) },
-                width = rendered.width,
-                height = rendered.height,
-            )
-            refreshThumbnail(id)
-        }
-
-        if (settings.current.autoOcr) {
-            runCatching { runOcrForPage(id, index) }
-        }
-
-        id
+        appendPages(
+            documentId = documentId,
+            pages = listOf(
+                RenderedPage(
+                    image = rendered,
+                    originalPath = capturePath,
+                    quad = scan.quad,
+                    rotation = scan.rotationDegrees,
+                    filterId = scan.filter.id,
+                ),
+            ),
+            documentName = documentName,
+        )
     }
 
     /** Imports gallery images, each becoming its own page with automatic edge detection. */
@@ -138,11 +185,21 @@ class ScanRepository(
                 failures++
                 continue
             }
-            val detection = com.kscanner.core.imaging.DocDetector.detect(image)
+            val plan = com.kscanner.core.imaging.AutoCrop.plan(
+                image,
+                workingEdge = 1080,
+                fixOrientation = settings.current.autoRotate,
+            )
+            val filter = if (settings.current.autoFilter) {
+                com.kscanner.core.imaging.Filters.auto(image)
+            } else {
+                settings.defaultFilter
+            }
             val scanSettings = ScanProcessor.Settings(
-                quad = detection?.quad,
-                rotationDegrees = 0,
-                filter = settings.defaultFilter,
+                quad = plan.quad,
+                rotationDegrees = plan.rotationDegrees,
+                deskewDegrees = if (settings.current.autoDeskew) plan.deskewDegrees else 0.0,
+                filter = filter,
                 maxOutputEdge = settings.current.maxImageEdge,
             )
             target = runCatching { saveCapture(target, capture.absolutePath, scanSettings) }
@@ -331,6 +388,24 @@ class ScanRepository(
     }
 
     // ---------------------------------------------------------------- export
+
+    /**
+     * Writes the document's recognised text to a plain `.txt` file.
+     *
+     * Text is only as useful as it is portable: a scan that has been OCR'd should be
+     * quotable, mailable and greppable without a PDF reader. Pages are separated by a ruled
+     * line so a reader can tell where one ended.
+     */
+    suspend fun exportText(documentId: Long): File? = withContext(Dispatchers.IO) {
+        val document = store.getDocument(documentId) ?: return@withContext null
+        val pages = store.getPages(documentId)
+        val body = pages.mapNotNull { it.ocrText?.trim()?.takeIf { text -> text.isNotEmpty() } }
+        if (body.isEmpty()) return@withContext null
+
+        val destination = storage.uniqueExportFile(document.name, "txt")
+        destination.writeText(body.joinToString("\n\n────────\n\n"))
+        destination
+    }
 
     suspend fun exportPdf(documentId: Long): File? = withContext(Dispatchers.Default) {
         val document = withContext(Dispatchers.IO) { store.getDocument(documentId) } ?: return@withContext null

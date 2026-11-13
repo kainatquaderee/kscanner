@@ -25,5 +25,13 @@ class SettingsViewModel(private val settings: SettingsStore) : ViewModel() {
 
     fun setKeepOriginals(enabled: Boolean) = settings.update { it.copy(keepOriginals = enabled) }
 
+    fun setAutoRotate(enabled: Boolean) = settings.update { it.copy(autoRotate = enabled) }
+
+    fun setAutoDeskew(enabled: Boolean) = settings.update { it.copy(autoDeskew = enabled) }
+
+    fun setAutoFilter(enabled: Boolean) = settings.update { it.copy(autoFilter = enabled) }
+
+    fun setScanMode(mode: com.kscanner.data.ScanMode) = settings.update { it.copy(scanMode = mode) }
+
     fun current(): AppSettings = settings.current
 }

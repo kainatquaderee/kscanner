@@ -35,6 +35,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.kscanner.core.imaging.ScanFilter
 import com.kscanner.data.PdfPageSize
+import com.kscanner.data.ScanMode
 import com.kscanner.data.ThemeMode
 import com.kscanner.ui.SettingsViewModel
 
@@ -80,6 +81,37 @@ fun SettingsScreen(
                 subtitle = "Run on-device OCR on every new page",
                 checked = settings.autoOcr,
                 onCheckedChange = viewModel::setAutoOcr,
+            )
+            SettingLabel("Camera opens in")
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ScanMode.entries.forEach { mode ->
+                    FilterChip(
+                        selected = settings.scanMode == mode,
+                        onClick = { viewModel.setScanMode(mode) },
+                        label = { Text(mode.label) },
+                    )
+                }
+            }
+
+            HorizontalDivider(Modifier.padding(vertical = 12.dp))
+            SectionHeader("Automatic correction")
+            SwitchRow(
+                title = "Straighten the page",
+                subtitle = "Turn a sideways or upside-down capture the right way up",
+                checked = settings.autoRotate,
+                onCheckedChange = viewModel::setAutoRotate,
+            )
+            SwitchRow(
+                title = "Remove leftover tilt",
+                subtitle = "Measure the lean of the text and level it after cropping",
+                checked = settings.autoDeskew,
+                onCheckedChange = viewModel::setAutoDeskew,
+            )
+            SwitchRow(
+                title = "Choose the look automatically",
+                subtitle = "Pick between colour, greyscale and shadow removal from the page itself",
+                checked = settings.autoFilter,
+                onCheckedChange = viewModel::setAutoFilter,
             )
 
             HorizontalDivider(Modifier.padding(vertical = 12.dp))

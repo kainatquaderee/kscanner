@@ -1,5 +1,6 @@
 package com.kscanner.ui.document
 
+import android.content.Context
 import android.content.Intent
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
@@ -170,6 +171,40 @@ fun DocumentScreen(
                                         context.startActivity(
                                             Intent.createChooser(viewModel.shareIntentForPages(), "Share pages"),
                                         )
+                                    }
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Copy text") },
+                                leadingIcon = { Icon(Icons.Outlined.ContentCopy, null) },
+                                enabled = viewModel.hasText,
+                                onClick = {
+                                    menuOpen = false
+                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE)
+                                        as android.content.ClipboardManager
+                                    clipboard.setPrimaryClip(
+                                        android.content.ClipData.newPlainText(
+                                            "KScanner text",
+                                            viewModel.combinedText,
+                                        ),
+                                    )
+                                    android.widget.Toast
+                                        .makeText(context, "Text copied", android.widget.Toast.LENGTH_SHORT)
+                                        .show()
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Export text (.txt)") },
+                                leadingIcon = { Icon(Icons.Outlined.Description, null) },
+                                enabled = viewModel.hasText,
+                                onClick = {
+                                    menuOpen = false
+                                    viewModel.exportText { file ->
+                                        runCatching {
+                                            context.startActivity(
+                                                Intent.createChooser(shareText(context, file), "Share text"),
+                                            )
+                                        }
                                     }
                                 },
                             )
@@ -530,14 +565,20 @@ private fun ArrangeDialog(
     )
 }
 
-private fun sharePdf(context: android.content.Context, file: File): Intent {
+private fun sharePdf(context: android.content.Context, file: File): Intent =
+    shareFile(context, file, "application/pdf")
+
+private fun shareText(context: android.content.Context, file: File): Intent =
+    shareFile(context, file, "text/plain")
+
+private fun shareFile(context: android.content.Context, file: File, mime: String): Intent {
     val uri = androidx.core.content.FileProvider.getUriForFile(
         context,
         "${context.packageName}.fileprovider",
         file,
     )
     return Intent(Intent.ACTION_SEND).apply {
-        type = "application/pdf"
+        type = mime
         putExtra(Intent.EXTRA_STREAM, uri)
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     }

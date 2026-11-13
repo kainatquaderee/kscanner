@@ -138,6 +138,28 @@ class DocumentViewModel(
         }
     }
 
+    /** Recognised text of every page, in order. Empty when nothing has been OCR'd. */
+    val combinedText: String
+        get() = pages.mapNotNull { it.ocrText?.trim()?.takeIf { text -> text.isNotEmpty() } }
+            .joinToString("\n\n────────\n\n")
+
+    val hasText: Boolean get() = pages.any { !it.ocrText.isNullOrBlank() }
+
+    /** Writes the recognised text to a `.txt` file and hands it to [onReady]. */
+    fun exportText(onReady: (File) -> Unit) {
+        viewModelScope.launch {
+            busy = true
+            busyLabel = "Writing text…"
+            val file = repository.exportText(documentId)
+            busy = false
+            if (file != null) {
+                onReady(file)
+            } else {
+                error = "No recognised text to export yet."
+            }
+        }
+    }
+
     fun allPageImages(): List<File> = pages.map { File(it.processedPath) }.filter { it.exists() }
 
     fun shareIntentForPages() = repository.shareImages(allPageImages())

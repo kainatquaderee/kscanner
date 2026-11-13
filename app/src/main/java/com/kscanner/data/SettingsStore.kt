@@ -24,6 +24,14 @@ data class AppSettings(
     val autoOcr: Boolean = false,
     val keepOriginals: Boolean = true,
     val autoCapture: Boolean = false,
+    /** Detect which way up the page is and turn it for the user. */
+    val autoRotate: Boolean = true,
+    /** Remove the small leftover tilt of the text after cropping. */
+    val autoDeskew: Boolean = true,
+    /** Pick the enhancement preset from the page's own measurements. */
+    val autoFilter: Boolean = false,
+    /** Mode the camera starts in. */
+    val scanMode: ScanMode = ScanMode.SINGLE,
 )
 
 /**
@@ -62,6 +70,12 @@ class SettingsStore(context: Context) {
         autoOcr = prefs.getBoolean(KEY_AUTO_OCR, false),
         keepOriginals = prefs.getBoolean(KEY_KEEP_ORIGINALS, true),
         autoCapture = prefs.getBoolean(KEY_AUTO_CAPTURE, false),
+        autoRotate = prefs.getBoolean(KEY_AUTO_ROTATE, true),
+        autoDeskew = prefs.getBoolean(KEY_AUTO_DESKEW, true),
+        autoFilter = prefs.getBoolean(KEY_AUTO_FILTER, false),
+        scanMode = runCatching {
+            ScanMode.valueOf(prefs.getString(KEY_SCAN_MODE, ScanMode.SINGLE.name)!!)
+        }.getOrDefault(ScanMode.SINGLE),
     )
 
     private fun persist(settings: AppSettings) {
@@ -75,6 +89,10 @@ class SettingsStore(context: Context) {
             .putBoolean(KEY_AUTO_OCR, settings.autoOcr)
             .putBoolean(KEY_KEEP_ORIGINALS, settings.keepOriginals)
             .putBoolean(KEY_AUTO_CAPTURE, settings.autoCapture)
+            .putBoolean(KEY_AUTO_ROTATE, settings.autoRotate)
+            .putBoolean(KEY_AUTO_DESKEW, settings.autoDeskew)
+            .putBoolean(KEY_AUTO_FILTER, settings.autoFilter)
+            .putString(KEY_SCAN_MODE, settings.scanMode.name)
             .apply()
     }
 
@@ -88,5 +106,9 @@ class SettingsStore(context: Context) {
         const val KEY_AUTO_OCR = "auto_ocr"
         const val KEY_KEEP_ORIGINALS = "keep_originals"
         const val KEY_AUTO_CAPTURE = "auto_capture"
+        const val KEY_AUTO_ROTATE = "auto_rotate"
+        const val KEY_AUTO_DESKEW = "auto_deskew"
+        const val KEY_AUTO_FILTER = "auto_filter"
+        const val KEY_SCAN_MODE = "scan_mode"
     }
 }

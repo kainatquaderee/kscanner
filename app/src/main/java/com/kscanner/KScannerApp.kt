@@ -9,6 +9,7 @@ import com.kscanner.ui.DocumentViewModel
 import com.kscanner.ui.EditorViewModel
 import com.kscanner.ui.LibraryViewModel
 import com.kscanner.ui.SettingsViewModel
+import com.kscanner.ui.capture.ScanSessionViewModel
 import com.kscanner.data.DocumentStore
 import com.kscanner.data.ScanRepository
 import com.kscanner.data.SettingsStore
@@ -53,6 +54,9 @@ class AppViewModelFactory(
 
             modelClass.isAssignableFrom(SettingsViewModel::class.java) ->
                 SettingsViewModel(container.settings)
+
+            modelClass.isAssignableFrom(ScanSessionViewModel::class.java) ->
+                ScanSessionViewModel(container.repository, container.settings)
 
             else -> throw IllegalArgumentException("unknown view model ${modelClass.name}")
         }

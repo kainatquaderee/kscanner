@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
@@ -24,15 +25,23 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Done
+import androidx.compose.material.icons.outlined.CreditCard
 import androidx.compose.material.icons.outlined.FlashOff
 import androidx.compose.material.icons.outlined.FlashOn
 import androidx.compose.material.icons.outlined.GridOn
 import androidx.compose.material.icons.outlined.GridOff
+import androidx.compose.material.icons.outlined.Description
+import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.PhotoCamera
+import androidx.compose.material.icons.outlined.Timer
+import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -50,13 +59,23 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.compose.foundation.Image
+import com.kscanner.core.imaging.CaptureAdvice
+import com.kscanner.core.imaging.CaptureGate
+import com.kscanner.data.ScanMode
+import com.kscanner.ui.capture.ScanSessionViewModel
+import android.os.Handler
+import android.os.Looper
+import java.util.concurrent.Executors
 import com.kscanner.KScannerApp
 
 /**
@@ -66,12 +85,20 @@ import com.kscanner.KScannerApp
 @Composable
 fun CameraScreen(
     documentId: Long?,
+    initialMode: ScanMode,
+    session: ScanSessionViewModel,
     onCaptured: (String) -> Unit,
+    onFinished: (Long) -> Unit,
     onClose: () -> Unit,
 ) {
     val context = LocalContext.current
     val app = context.applicationContext as KScannerApp
     val lifecycleOwner = LocalLifecycleOwner.current
+
+    LaunchedEffect(Unit) {
+        session.prepare(initialMode)
+        session.beginInto(documentId)
+    }
 
     var hasPermission by remember {
         mutableStateOf(
@@ -112,15 +139,57 @@ fun CameraScreen(
     var maxZoom by remember { mutableStateOf(1f) }
     var camera by remember { mutableStateOf<androidx.camera.core.Camera?>(null) }
 
+    var autoCapture by remember { mutableStateOf(app.container.settings.current.autoCapture) }
+    var advice by remember { mutableStateOf(CaptureAdvice.GOOD) }
+    var readiness by remember { mutableStateOf(0.0) }
+    val gate = remember { CaptureGate() }
+
+    val mainHandler = remember { Handler(Looper.getMainLooper()) }
+    val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
+
     val providerFuture = remember { ProcessCameraProvider.getInstance(context) }
+
+    /** Fires the shutter once. Shared by the button and the automatic gate. */
+    fun shoot() {
+        if (capturing) return
+        val capture = imageCapture ?: return
+        capturing = true
+        error = null
+        gate.reset()
+        readiness = 0.0
+        val file = app.container.storage.newCaptureFile()
+        val options = ImageCapture.OutputFileOptions.Builder(file).build()
+        capture.takePicture(
+            options,
+            ContextCompat.getMainExecutor(context),
+            object : ImageCapture.OnImageSavedCallback {
+                override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
+                    capturing = false
+                    if (session.mode.isContinuous) {
+                        session.consume(file.absolutePath)
+                    } else {
+                        onCaptured(file.absolutePath)
+                    }
+                }
+
+                override fun onError(exception: ImageCaptureException) {
+                    capturing = false
+                    error = "Capture failed: ${exception.message}"
+                }
+            },
+        )
+    }
 
     DisposableEffect(Unit) {
         val listener = Runnable { cameraProvider = runCatching { providerFuture.get() }.getOrNull() }
         providerFuture.addListener(listener, ContextCompat.getMainExecutor(context))
-        onDispose { cameraProvider?.unbindAll() }
+        onDispose {
+            cameraProvider?.unbindAll()
+            analysisExecutor.shutdown()
+        }
     }
 
-    LaunchedEffect(cameraProvider, previewView) {
+    LaunchedEffect(cameraProvider, previewView, autoCapture) {
         val provider = cameraProvider ?: return@LaunchedEffect
         val view = previewView ?: return@LaunchedEffect
 
@@ -131,10 +200,41 @@ fun CameraScreen(
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
             .build()
 
+        // Analysis stays bound only in automatic mode: there is no reason to burn battery
+        // measuring frames nobody is going to act on.
+        val analysis = if (autoCapture) {
+            ImageAnalysis.Builder()
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .setTargetResolution(android.util.Size(640, 480))
+                .build()
+                .also { useCase ->
+                    useCase.setAnalyzer(
+                        analysisExecutor,
+                        AutoCaptureAnalyzer(
+                            gate = gate,
+                            onAdvice = { next, progress ->
+                                mainHandler.post {
+                                    advice = next
+                                    readiness = progress
+                                }
+                            },
+                            onFire = { mainHandler.post { shoot() } },
+                        ),
+                    )
+                }
+        } else {
+            null
+        }
+
         val selector = CameraSelector.DEFAULT_BACK_CAMERA
         runCatching {
             provider.unbindAll()
-            val bound = provider.bindToLifecycle(lifecycleOwner, selector, preview, capture)
+            val useCases = if (analysis != null) {
+                arrayOf<androidx.camera.core.UseCase>(preview, capture, analysis)
+            } else {
+                arrayOf<androidx.camera.core.UseCase>(preview, capture)
+            }
+            val bound = provider.bindToLifecycle(lifecycleOwner, selector, *useCases)
             camera = bound
             imageCapture = capture
             maxZoom = bound.cameraInfo.zoomState.value?.maxZoomRatio ?: 1f
@@ -193,11 +293,44 @@ fun CameraScreen(
                     tint = Color.White,
                 )
             }
+            IconButton(
+                onClick = {
+                    autoCapture = !autoCapture
+                    gate.reset()
+                    readiness = 0.0
+                    app.container.settings.update { it.copy(autoCapture = autoCapture) }
+                },
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Timer,
+                    contentDescription = if (autoCapture) "Automatic shutter on" else "Automatic shutter off",
+                    tint = if (autoCapture) MaterialTheme.colorScheme.primary else Color.White,
+                )
+            }
             IconButton(onClick = { torchOn = !torchOn }) {
                 Icon(
                     imageVector = if (torchOn) Icons.Outlined.FlashOn else Icons.Outlined.FlashOff,
                     contentDescription = "Toggle flash",
                     tint = if (torchOn) MaterialTheme.colorScheme.primary else Color.White,
+                )
+            }
+        }
+
+        // Mode selector: what each shot becomes.
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 56.dp)
+                .align(Alignment.TopCenter)
+                .padding(horizontal = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            for (option in ScanMode.entries) {
+                ModeChip(
+                    mode = option,
+                    active = session.mode == option,
+                    onClick = { session.updateMode(option) },
                 )
             }
         }
@@ -236,38 +369,49 @@ fun CameraScreen(
             }
 
             Text(
-                text = if (documentId != null) "Capturing into the open document" else "New document",
+                text = buildString {
+                    append(session.mode.hint)
+                    if (documentId != null) append("  ·  into the open document")
+                },
                 color = Color.White.copy(alpha = 0.8f),
                 style = MaterialTheme.typography.labelMedium,
                 modifier = Modifier.padding(bottom = 12.dp),
             )
 
+            // Page strip for the continuous modes: a glance at what has landed so far.
+            if (session.mode.isContinuous && session.recent.isNotEmpty()) {
+                LazyRow(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+                ) {
+                    items(session.recent) { thumb ->
+                        Image(
+                            bitmap = thumb,
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .size(46.dp)
+                                .clip(RoundedCornerShape(6.dp)),
+                        )
+                    }
+                }
+            }
+
+            session.status?.let { message ->
+                Text(
+                    text = message,
+                    color = Color.White.copy(alpha = 0.9f),
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.padding(bottom = 8.dp),
+                )
+            }
+
             val scale by animateFloatAsState(if (capturing) 0.86f else 1f, label = "shutter")
 
             Surface(
-                onClick = {
-                    if (capturing) return@Surface
-                    val capture = imageCapture ?: return@Surface
-                    capturing = true
-                    error = null
-                    val file = app.container.storage.newCaptureFile()
-                    val options = ImageCapture.OutputFileOptions.Builder(file).build()
-                    capture.takePicture(
-                        options,
-                        ContextCompat.getMainExecutor(context),
-                        object : ImageCapture.OnImageSavedCallback {
-                            override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
-                                capturing = false
-                                onCaptured(file.absolutePath)
-                            }
-
-                            override fun onError(exception: ImageCaptureException) {
-                                capturing = false
-                                error = "Capture failed: ${exception.message}"
-                            }
-                        },
-                    )
-                },
+                onClick = { shoot() },
                 modifier = Modifier.size(76.dp),
                 shape = CircleShape,
                 color = Color.White.copy(alpha = 0.16f),
@@ -276,6 +420,15 @@ fun CameraScreen(
                 Box(Modifier.fillMaxSize(), Alignment.Center) {
                     if (capturing) {
                         CircularProgressIndicator(color = Color.White, strokeWidth = 3.dp, modifier = Modifier.size(28.dp))
+                    } else if (autoCapture) {
+                        // A ring that fills as the frame settles, so the wait is legible.
+                        CircularProgressIndicator(
+                            progress = { readiness.toFloat() },
+                            color = MaterialTheme.colorScheme.primary,
+                            trackColor = Color.White.copy(alpha = 0.35f),
+                            strokeWidth = 4.dp,
+                            modifier = Modifier.size(52.dp),
+                        )
                     } else {
                         Icon(
                             Icons.Outlined.PhotoCamera,
@@ -287,7 +440,17 @@ fun CameraScreen(
                 }
             }
 
-            error?.let { message ->
+            if (autoCapture) {
+                Text(
+                    text = advice.message,
+                    color = if (advice == CaptureAdvice.GOOD) Color.White.copy(alpha = 0.9f)
+                    else MaterialTheme.colorScheme.primary,
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+            }
+
+            (error ?: session.error)?.let { message ->
                 Text(
                     text = message,
                     color = MaterialTheme.colorScheme.error,
@@ -295,6 +458,61 @@ fun CameraScreen(
                     modifier = Modifier.padding(top = 10.dp),
                 )
             }
+
+            if (session.mode.isContinuous) {
+                Spacer(Modifier.height(14.dp))
+                Button(
+                    onClick = { session.documentId?.let(onFinished) ?: onClose() },
+                    enabled = session.pageCount > 0 && !session.busy,
+                    colors = ButtonDefaults.buttonColors(),
+                ) {
+                    Icon(Icons.Filled.Done, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        if (session.pageCount == 0) {
+                            "Done"
+                        } else {
+                            "Done  ·  ${session.pageCount} ${if (session.pageCount == 1) "page" else "pages"}"
+                        },
+                    )
+                }
+                if (session.busy) {
+                    Text(
+                        text = "Adding the page...",
+                        color = Color.White.copy(alpha = 0.75f),
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ModeChip(mode: ScanMode, active: Boolean, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(16.dp),
+        color = if (active) Color.White else Color.Black.copy(alpha = 0.42f),
+        contentColor = if (active) Color.Black else Color.White,
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+        ) {
+            Icon(
+                imageVector = when (mode) {
+                    ScanMode.SINGLE -> Icons.Outlined.Description
+                    ScanMode.BATCH -> Icons.Outlined.PhotoLibrary
+                    ScanMode.BOOK -> Icons.AutoMirrored.Outlined.MenuBook
+                    ScanMode.ID_CARD -> Icons.Outlined.CreditCard
+                },
+                contentDescription = null,
+                modifier = Modifier.size(15.dp),
+            )
+            Spacer(Modifier.width(5.dp))
+            Text(text = mode.label, style = MaterialTheme.typography.labelSmall)
         }
     }
 }

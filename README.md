@@ -43,8 +43,18 @@ algorithms that ship are the ones covered by the unit tests.
 - Multi-select for bulk rename and delete
 - Reorder pages, rotate pages, delete pages
 
-Everything is stored in app-private storage. There is no analytics, no account and no
-network permission.
+Everything is stored in app-private storage. There is no analytics and no account. The only
+permissions the built APK declares are `CAMERA`, `READ_MEDIA_IMAGES`, and
+`READ_EXTERNAL_STORAGE` (capped at API 32 for pre-13 gallery access).
+
+ML Kit's transitive Play Services dependencies declare `INTERNET` and
+`ACCESS_NETWORK_STATE`; both are explicitly removed in the manifest with
+`tools:node="remove"`, because the bundled text recogniser runs entirely on device. You can
+confirm this on any build:
+
+```bash
+aapt2 dump badging app/build/outputs/apk/debug/app-debug.apk | grep uses-permission
+```
 
 ## Building
 

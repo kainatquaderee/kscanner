@@ -1,7 +1,9 @@
 package com.kscanner.core.imaging
 
+import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.roundToInt
+import kotlin.math.sin
 
 /** Geometry-preserving image resampling and reorientation. */
 object Transforms {
@@ -100,6 +102,42 @@ object Transforms {
             270 -> rotate270(src)
             else -> throw IllegalArgumentException("rotation must be a multiple of 90, was $degrees")
         }
+    }
+
+    /**
+     * Rotates the picture by an arbitrary angle about its centre, keeping the canvas size.
+     *
+     * Used for deskew, where the correction is a few degrees at most: an expanded canvas
+     * would only add triangular wedges to trim afterwards. Sampling is inverse-mapped with
+     * bilinear interpolation, and coordinates outside the source clamp to the edge, so the
+     * narrow bands exposed at the corners take their colour from the paper beside them.
+     *
+     * Positive angles turn the picture clockwise, matching [Skew]'s sign convention.
+     */
+    fun rotateArbitrary(src: RgbaImage, degrees: Double): RgbaImage {
+        val d = ((degrees % 360.0) + 360.0) % 360.0
+        val shortest = if (d > 180.0) d - 360.0 else d
+        if (shortest > -0.05 && shortest < 0.05) return src.copy()
+
+        val rad = Math.toRadians(shortest)
+        val c = cos(rad)
+        val s = sin(rad)
+        val cx = (src.width - 1) / 2.0
+        val cy = (src.height - 1) / 2.0
+
+        val out = IntArray(src.size)
+        var i = 0
+        for (y in 0 until src.height) {
+            val dy = y - cy
+            for (x in 0 until src.width) {
+                val dx = x - cx
+                // Inverse rotation: the pixel that must be sampled for this destination.
+                val px = c * dx + s * dy + cx
+                val py = -s * dx + c * dy + cy
+                out[i++] = src.sampleBilinear(px, py)
+            }
+        }
+        return RgbaImage(src.width, src.height, out)
     }
 
     fun flipHorizontal(src: RgbaImage): RgbaImage {

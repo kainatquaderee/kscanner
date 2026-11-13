@@ -77,6 +77,84 @@ object TestImages {
         return image
     }
 
+    /**
+     * A light sheet with evenly spaced dark text bars. Text like this has a strong row
+     * profile, which is what [Orientation] and [Skew] look for.
+     */
+    fun textPage(
+        width: Int = 340,
+        height: Int = 460,
+        paper: Int = 0xFFF6F6F6.toInt(),
+        ink: Int = 0xFF101010.toInt(),
+        lines: Int = 12,
+        barHeight: Int = 6,
+        lineGap: Int = 30,
+        margin: Int = 26,
+    ): RgbaImage {
+        val image = solid(width, height, paper)
+        var y = margin
+        var index = 0
+        while (y + barHeight < height - margin && index < lines) {
+            val right = width - margin - if (index % 3 == 2) width / 5 else 0
+            for (yy in y until y + barHeight) {
+                for (xx in margin until right) image.set(xx, yy, ink)
+            }
+            y += lineGap
+            index++
+        }
+        return image
+    }
+
+    /**
+     * Text lines shaped like real prose rows: narrow at the top where only ascenders and
+     * capitals reach, full width at the baseline. The uneven row profile is the signal the
+     * orientation flip cue relies on, so a page of solid bars cannot exercise it.
+     */
+    fun asymmetricTextPage(
+        width: Int = 340,
+        height: Int = 480,
+        paper: Int = 0xFFF6F6F6.toInt(),
+        ink: Int = 0xFF101010.toInt(),
+        lines: Int = 12,
+        lineGap: Int = 34,
+        margin: Int = 24,
+    ): RgbaImage {
+        val image = solid(width, height, paper)
+        val full = width - 2 * margin
+        var y = margin
+        var index = 0
+        while (y + 16 < height - margin && index < lines) {
+            for (row in 0 until 16) {
+                // A trapezoid: 45% wide at the top, full width at the bottom.
+                val t = row / 15.0
+                val span = (full * (0.45 + 0.55 * t)).toInt()
+                for (xx in margin until margin + span) image.set(xx, y + row, ink)
+            }
+            y += lineGap
+            index++
+        }
+        return image
+    }
+
+    /** A dark vertical crease down the middle of an otherwise light sheet. */
+    fun spreadWithGutter(
+        width: Int = 400,
+        height: Int = 300,
+        seamFraction: Double = 0.5,
+        paper: Int = 0xFFF2F2F2.toInt(),
+        crease: Int = 0xFF6A6A6A.toInt(),
+    ): RgbaImage {
+        val image = solid(width, height, paper)
+        val centre = (width * seamFraction).toInt()
+        val half = (width * 0.03).toInt().coerceAtLeast(2)
+        for (y in 0 until height) {
+            for (x in (centre - half)..(centre + half)) {
+                if (x in 0 until width) image.set(x, y, crease)
+            }
+        }
+        return image
+    }
+
     /** Smallest achievable maximum corner separation over all corner pairings. */
     fun maxCornerError(a: Quad, b: Quad): Double {
         val pa = a.points

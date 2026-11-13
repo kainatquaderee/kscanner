@@ -11,7 +11,8 @@ enum class ScanFilter(val id: Int, val label: String, val description: String) {
     ENHANCE(2, "Enhance", "Sharper with deeper contrast"),
     GRAYSCALE(3, "Grayscale", "Neutral grey tones"),
     BLACK_WHITE(4, "B&W", "Crisp text on white"),
-    LIGHTEN(5, "Lighten", "Lifts shadows and stains");
+    LIGHTEN(5, "Lighten", "Lifts shadows and stains"),
+    SHADOW_FREE(6, "Shadow Free", "Flattens shadows and uneven light");
 
     companion object {
         fun fromId(id: Int): ScanFilter = entries.firstOrNull { it.id == id } ?: ORIGINAL
@@ -35,8 +36,27 @@ object Filters {
             ScanFilter.GRAYSCALE -> grayscale(src)
             ScanFilter.BLACK_WHITE -> blackAndWhite(src)
             ScanFilter.LIGHTEN -> lighten(src)
+            ScanFilter.SHADOW_FREE -> shadowFree(src)
         }
         return if (amount >= 1f) processed else blend(src, processed, amount)
+    }
+
+    /**
+     * Chooses a preset from the frame's own measurements rather than asking the user.
+     *
+     * A page lit from one side reads high on the illumination ramp and wants the flat-field
+     * correction; a low-contrast but inky page wants the contrast boost; everything else
+     * gets the all-rounder.
+     */
+    fun auto(src: RgbaImage): ScanFilter {
+        val gray = src.toGray()
+        val report = Quality.analyse(gray)
+        return when {
+            report.illuminationRamp > 0.30 || report.shadowHeavy -> ScanFilter.SHADOW_FREE
+            report.inkFraction > 0.03 && report.contrast < 55.0 -> ScanFilter.ENHANCE
+            report.meanLuma > 235.0 -> ScanFilter.BLACK_WHITE
+            else -> ScanFilter.MAGIC_COLOR
+        }
     }
 
     fun blend(a: RgbaImage, b: RgbaImage, t: Float): RgbaImage {
@@ -177,8 +197,26 @@ object Filters {
         return RgbaImage(src.width, src.height, out)
     }
 
-    private fun blackAndWhite(src: RgbaImage): RgbaImage {
-        val gray = src.toGray()
+    /**
+     * Flat-field correction in colour: divide out a heavily blurred estimate of the scene's
+     * own lighting, channel by channel, then stretch. A shadow or a gradient across the page
+     * becomes flat white while the ink stays dark, which a global curve cannot do.
+     */
+    private fun shadowFree(src: RgbaImage): RgbaImage {
+        val radius = max(12, max(src.width, src.height) / 9)
+        val acc = RgbaImage(src.width, src.height, IntArray(src.size))
+        for (shift in intArrayOf(16, 8, 0)) {
+            val channel = channelAsGray(src, shift)
+            val flat = Threshold.normalizeIllumination(channel, radius, floorLevel = 40)
+            writeChannel(acc, shift, Threshold.stretch(flat, 0.002, 0.998))
+        }
+        for (i in 0 until src.size) {
+            acc.pixels[i] = acc.pixels[i] or (Px.a(src.pixels[i]) shl 24)
+        }
+        return acc
+    }
+
+    private fun blackAndWhite(src: RgbaImage): RgbaImage {        val gray = src.toGray()
         val radius = max(8, max(src.width, src.height) / 20)
         val flattened = Threshold.normalizeIllumination(gray, radius, floorLevel = 48)
         val window = max(6, min(src.width, src.height) / 48)

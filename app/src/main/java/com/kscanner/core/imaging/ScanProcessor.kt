@@ -1,5 +1,6 @@
 package com.kscanner.core.imaging
 
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
@@ -14,6 +15,8 @@ object ScanProcessor {
         /** Outline in the coordinate space of the rotated source, or null to keep the full frame. */
         val quad: Quad? = null,
         val rotationDegrees: Int = 0,
+        /** Residual text skew to remove after cropping, in degrees (clockwise positive). */
+        val deskewDegrees: Double = 0.0,
         val filter: ScanFilter = ScanFilter.MAGIC_COLOR,
         val strength: Float = 1f,
         val brightness: Float = 0f,
@@ -27,6 +30,7 @@ object ScanProcessor {
     fun process(source: RgbaImage, settings: Settings): RgbaImage {
         var image = rotateIfNeeded(source, settings.rotationDegrees)
         image = cropIfNeeded(image, settings.quad, settings.maxOutputEdge)
+        image = deskewIfNeeded(image, settings.deskewDegrees)
         image = Filters.apply(image, settings.filter, settings.strength)
         image = applyManual(image, settings)
         return image
@@ -48,6 +52,7 @@ object ScanProcessor {
 
         val previewQuad = settings.quad?.scaled(scale, scale)
         image = cropIfNeeded(image, previewQuad, previewEdge)
+        image = deskewIfNeeded(image, settings.deskewDegrees)
         image = Filters.apply(image, settings.filter, settings.strength)
         image = applyManual(image, settings)
 
@@ -75,6 +80,9 @@ object ScanProcessor {
         val normalized = ((degrees % 360) + 360) % 360
         return if (normalized == 0) source else Transforms.rotate(source, normalized)
     }
+
+    private fun deskewIfNeeded(image: RgbaImage, degrees: Double): RgbaImage =
+        if (abs(degrees) < 0.08) image else Transforms.rotateArbitrary(image, degrees)
 
     private fun cropIfNeeded(source: RgbaImage, quad: Quad?, maxEdge: Int): RgbaImage {
         if (quad == null) return source

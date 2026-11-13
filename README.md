@@ -70,6 +70,32 @@ echo "sdk.dir=$ANDROID_HOME" > local.properties
 
 The debug APK lands at `app/build/outputs/apk/debug/app-debug.apk`.
 
+## Releases
+
+Signed APKs are published on the [Releases page](https://github.com/kainatquaderee/kscanner/releases).
+Each one is built from a tag, so you can reproduce it locally:
+
+```bash
+git clone https://github.com/kainatquaderee/kscanner
+cd kscanner
+git checkout v1.0.0
+echo "sdk.dir=$ANDROID_HOME" > local.properties
+./gradlew :app:assembleRelease
+sha256sum app/build/outputs/apk/release/app-release.apk
+```
+
+Every release is signed with APK Signature Scheme v2 and v3. Check that a downloaded APK
+really came from this project by comparing certificate digests:
+
+```bash
+apksigner verify --print-certs app-release.apk
+# Signer #1 certificate SHA-256 digest: b98924a5ba364b67ac61837550e3d2845e3b1c05ac95a42bdeb95230638066fd
+```
+
+Android refuses to install an update signed with a different key, so if you previously
+installed a build from another source, uninstall it first. See [SIGNING.md](SIGNING.md) for
+how the keys are managed.
+
 ## Architecture
 
 ```

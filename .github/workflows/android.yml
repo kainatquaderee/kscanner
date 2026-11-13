@@ -59,8 +59,8 @@ jobs:
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
 
-  release:
-    name: Build release APK
+  minified:
+    name: Minified build check
     runs-on: ubuntu-latest
     timeout-minutes: 45
     needs: build
@@ -82,13 +82,18 @@ jobs:
       - name: Configure SDK location
         run: echo "sdk.dir=$ANDROID_HOME" > local.properties
 
-      # Minified build: catches R8 stripping something ML Kit needs at runtime.
-      - name: Build release APK
+      # R8 runs here so a ProGuard rule that strips something ML Kit needs at runtime is
+      # caught on every push rather than at tag time. No artifact is published: unsigned
+      # output would only be confusing next to the signed APK from the Release workflow.
+      - name: Compile minified release
         run: ./gradlew :app:assembleRelease --stacktrace
 
-      - name: Upload release APK
-        uses: actions/upload-artifact@v5
-        with:
-          name: kscanner-release-apk-unsigned
-          path: app/build/outputs/apk/release/*.apk
-          if-no-files-found: error
+      - name: Confirm the build was unsigned, as expected without secrets
+        run: |
+          set -euo pipefail
+          APKSIGNER=$(ls -1 "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          if "$APKSIGNER" verify app/build/outputs/apk/release/app-release.apk > /dev/null 2>&1; then
+            echo "::warning::This CI job produced a signed APK; signing secrets are visible to it."
+          else
+            echo "Unsigned, as expected."
+          fi

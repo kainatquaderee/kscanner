@@ -107,4 +107,40 @@ class ScanModesTest {
         val ratio = (e[0] + e[2]) / 2.0 / ((e[1] + e[3]) / 2.0)
         assertTrue("ratio was $ratio", Math.abs(ratio - 1.586) / 1.586 < 0.25)
     }
+
+    /**
+     * The plan carries the outline twice, in pixels and as 0..1 fractions, because the two
+     * differ by the frame size. Mixing them up inflated the outline by the downscale factor
+     * and dragged it off the picture. The capture here is deliberately bigger than the
+     * detector's working edge, so the two spaces genuinely differ.
+     */
+    @Test
+    fun `the normalised outline is the pixel outline over the frame size`() {
+        val truth = Quad(
+            Pt(300.0, 250.0),
+            Pt(1330.0, 190.0),
+            Pt(1420.0, 1810.0),
+            Pt(270.0, 1740.0),
+        )
+        val photo = TestImages.documentOnBackground(1600, 2000, truth)
+
+        val plan = AutoCrop.plan(photo)
+
+        val quad = plan.quad
+        assertNotNull("an outline was expected", quad)
+        val normalised = plan.quadNormalised
+        assertNotNull("the normalised outline travels with the pixel one", normalised)
+
+        // What the editor draws: every corner has to stay on the picture.
+        normalised!!.points.forEach {
+            assertTrue("corner $it left the frame", it.x >= -0.05 && it.x <= 1.05 && it.y >= -0.05 && it.y <= 1.05)
+        }
+
+        // And it is the pixel outline divided by the rotated frame, not by a preview size.
+        val frameWidth = if (plan.rotationDegrees % 180 == 0) photo.width else photo.height
+        val frameHeight = if (plan.rotationDegrees % 180 == 0) photo.height else photo.width
+        val restored = normalised.scaled(frameWidth.toDouble(), frameHeight.toDouble())
+        val error = TestImages.maxCornerError(quad!!, restored)
+        assertTrue("normalised and pixel outlines disagree by $error px", error < 2.0)
+    }
 }

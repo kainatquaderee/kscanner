@@ -159,13 +159,11 @@ class EditorViewModel(
                 fixOrientation = settingsStore.current.autoRotate,
             )
             val rotated = Transforms.rotate(source, plan.rotationDegrees)
-            val rotatedQuad = plan.quad
             val preview = Transforms.fitLongestEdge(rotated, 1080)
             if (applyStyle && settingsStore.current.autoFilter) {
-                val upright = Transforms.fitLongestEdge(rotated, 1080)
-                filter = Filters.auto(upright)
+                filter = Filters.auto(preview)
             }
-            Prepared(plan, rotatedQuad, preview)
+            Prepared(plan, preview)
         }
 
         rotation = prepared.plan.rotationDegrees
@@ -175,12 +173,12 @@ class EditorViewModel(
         advice = prepared.plan.quality.advice
         previewImage = prepared.preview
 
-        val quad = prepared.quad
-        quadNorm = if (quad != null) {
-            quad.scaled(1.0 / prepared.preview.width, 1.0 / prepared.preview.height)
-        } else {
-            Quad.rect(1.0, 1.0).insetBy(0.025)
-        }
+        // Take the outline from the plan as 0..1 fractions of the frame. It is *not* re-derived
+        // here: the plan's other outline is in full-resolution pixels, and dividing that by the
+        // on-screen preview size inflated it by the downscale factor and dragged it off the
+        // picture. AutoCrop has already rejected any outline that leaves the frame.
+        val quad = prepared.plan.quadNormalised
+        quadNorm = quad ?: Quad.rect(1.0, 1.0).insetBy(0.025)
         autoDetected = quad != null
 
         previewBitmap = withContext(Dispatchers.Default) {
@@ -190,7 +188,6 @@ class EditorViewModel(
 
     private class Prepared(
         val plan: AutoCrop.Plan,
-        val quad: Quad?,
         val preview: RgbaImage,
     )
 

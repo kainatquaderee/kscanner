@@ -267,27 +267,29 @@ private fun EmptyEditor() {
 
 /**
  * One line explaining what the automatic pass decided, so the crop stage is never a black
- * box: which cue found the outline, how sure it is, and what is wrong with the shot when
- * something is.
+ * box: which cue found the outline and how sure it is, plus whatever is wrong with the shot
+ * when something is. The two are independent, so one must not hide the other — a page can be
+ * found perfectly on a badly lit table.
  */
 private fun cropStatus(viewModel: EditorViewModel): String {
-    val advice = viewModel.advice
-    if (advice != CaptureAdvice.GOOD) return advice.message
-
     val method = viewModel.detectionMethod
-        ?: return "Outline not detected — drag the corners onto the page"
-
-    val confidence = when {
-        viewModel.detectionConfidence >= 0.75 -> "high confidence"
-        viewModel.detectionConfidence >= 0.45 -> "medium confidence"
-        else -> "low confidence"
+    val outline = if (method == null) {
+        "Outline not detected — drag the corners onto the page"
+    } else {
+        val confidence = when {
+            viewModel.detectionConfidence >= 0.75 -> "high confidence"
+            viewModel.detectionConfidence >= 0.45 -> "medium confidence"
+            else -> "low confidence"
+        }
+        val source = when (method) {
+            DetectMethod.EDGES -> "page edges"
+            DetectMethod.BRIGHT_REGION -> "the bright sheet"
+            DetectMethod.TEXT_BLOCK -> "the text block"
+        }
+        "Outline from $source, $confidence — drag a corner to fine-tune"
     }
-    val source = when (method) {
-        DetectMethod.EDGES -> "page edges"
-        DetectMethod.BRIGHT_REGION -> "the bright sheet"
-        DetectMethod.TEXT_BLOCK -> "the text block"
-    }
-    return "Outline from $source, $confidence — drag a corner to fine-tune"
+    val advice = viewModel.advice
+    return if (advice == CaptureAdvice.GOOD) outline else "$outline  ·  ${advice.message}"
 }
 
 @Composable

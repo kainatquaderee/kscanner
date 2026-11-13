@@ -86,9 +86,21 @@ git tag v1.2.0
 git push origin v1.2.0
 ```
 
-The tag name supplies `versionName` (leading `v` stripped) and the workflow run number
-supplies `versionCode`, so builds are monotonic and distinguishable on device. The workflow
-also accepts a manual `workflow_dispatch` with a tag input, creating the tag if needed.
+Tags must be `vMAJOR.MINOR.PATCH`. Both version fields come from the tag, so rebuilding a
+tag reproduces the same APK version:
+
+| Tag       | `versionName` | `versionCode` |
+| --------- | ------------- | ------------- |
+| `v1.0.0`  | `1.0.0`       | `10000`       |
+| `v1.2.3`  | `1.2.3`       | `10203`       |
+| `v2.0.1`  | `2.0.1`       | `20001`       |
+
+Minor and patch must stay below 100 for the encoding to be unambiguous. Never reuse or move a
+published tag with a different number: Android blocks installing an APK whose `versionCode` is
+lower than the installed one, so number releases upward.
+
+The workflow also accepts a manual `workflow_dispatch` with a tag input, creating the tag if
+needed, and verifies afterwards that the built APK really reports the expected version.
 
 ## Backing up
 

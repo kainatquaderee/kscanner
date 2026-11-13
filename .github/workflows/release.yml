@@ -88,6 +88,36 @@ jobs:
             -alias "$RELEASE_KEY_ALIAS" > /dev/null
           echo "Keystore decoded and '$RELEASE_KEY_ALIAS' is readable."
 
+      - name: Derive version from tag
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_TAG#v}"
+
+          # versionCode is derived from the tag rather than the run number so that a
+          # rebuild of an old tag yields the identical APK version. github.run_number
+          # restarts at 1 for every new workflow, so it would neither reproduce nor
+          # stay above earlier releases.
+          if ! [[ "$VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "::error::Tag '$RELEASE_TAG' is not of the form vMAJOR.MINOR.PATCH"
+            exit 1
+          fi
+          MAJOR=$((10#${BASH_REMATCH[1]}))
+          MINOR=$((10#${BASH_REMATCH[2]}))
+          PATCH=$((10#${BASH_REMATCH[3]}))
+          if (( MINOR > 99 || PATCH > 99 )); then
+            echo "::error::Minor and patch must be below 100 to keep versionCode unambiguous"
+            exit 1
+          fi
+          VERSION_CODE=$(( MAJOR * 10000 + MINOR * 100 + PATCH ))
+          if (( VERSION_CODE < 1 )); then
+            echo "::error::versionCode must be at least 1"
+            exit 1
+          fi
+
+          echo "VERSION_NAME=$VERSION" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+          echo "$RELEASE_TAG -> versionName $VERSION, versionCode $VERSION_CODE"
+
       - name: Run unit tests
         run: ./gradlew :app:testDebugUnitTest --stacktrace
 
@@ -98,11 +128,9 @@ jobs:
           KSCANNER_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          VERSION_NAME="${RELEASE_TAG#v}"
-          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
           ./gradlew :app:assembleRelease --stacktrace \
             -PversionName="$VERSION_NAME" \
-            -PversionCode="${{ github.run_number }}"
+            -PversionCode="$VERSION_CODE"
 
       - name: Verify signature and checksum
         id: verify
@@ -114,6 +142,19 @@ jobs:
           # Non-zero exit here means the APK is unsigned or the signature is broken,
           # which must never reach a release.
           "$APKSIGNER" verify --verbose --print-certs "$APK"
+
+          # Guard that the -P overrides actually reached AndroidManifest merging. A
+          # silently ignored property would publish an APK with the checked-in default
+          # version, which is how versionCode 1 slipped into the first release.
+          AAPT2=$(ls -1 "$ANDROID_HOME"/build-tools/*/aapt2 | sort -V | tail -1)
+          BADGING=$("$AAPT2" dump badging "$APK" 2>/dev/null | head -1)
+          ACTUAL_CODE=$(sed -n "s/.*versionCode='\([0-9]*\)'.*/\1/p" <<< "$BADGING")
+          ACTUAL_NAME=$(sed -n "s/.*versionName='\([^']*\)'.*/\1/p" <<< "$BADGING")
+          if [ "$ACTUAL_CODE" != "$VERSION_CODE" ] || [ "$ACTUAL_NAME" != "$VERSION_NAME" ]; then
+            echo "::error::APK reports versionName='$ACTUAL_NAME' versionCode='$ACTUAL_CODE'; expected '$VERSION_NAME' / '$VERSION_CODE'"
+            exit 1
+          fi
+          echo "APK reports versionName $ACTUAL_NAME, versionCode $ACTUAL_CODE."
 
           FINGERPRINT=$("$APKSIGNER" verify --print-certs "$APK" \
             | grep -m1 'SHA-256 digest' | awk '{print $NF}')
@@ -152,7 +193,7 @@ jobs:
           # Signer #1 certificate SHA-256 digest: $FINGERPRINT
           \`\`\`
 
-          APK size: $APK_BYTES bytes.
+          APK size: $APK_BYTES bytes. versionName $VERSION_NAME, versionCode $VERSION_CODE.
           EOF
           echo "NOTES_FILE=$RUNNER_TEMP/notes.md" >> "$GITHUB_ENV"
 

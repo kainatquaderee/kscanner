@@ -128,6 +128,7 @@ object Viewports {
                 offset = state.offsetX,
                 scale = scale,
                 center = viewport.centerX,
+                windowStart = viewport.left,
                 windowSpan = viewport.width,
                 contentStart = content.left,
                 contentSpan = content.width,
@@ -136,6 +137,7 @@ object Viewports {
                 offset = state.offsetY,
                 scale = scale,
                 center = viewport.centerY,
+                windowStart = viewport.top,
                 windowSpan = viewport.height,
                 contentStart = content.top,
                 contentSpan = content.height,
@@ -171,15 +173,24 @@ object Viewports {
     /**
      * One axis of [clamp]. The content's leading edge lands at `center + (start - center) * scale +
      * offset` and its trailing edge one scaled span further along, so requiring the first to be at
-     * most zero and the second at least the window span gives the range the offset may live in.
+     * most the window's leading edge ([windowStart]) and the second at least its trailing edge
+     * (`windowStart + windowSpan`) gives the range the offset may live in.
+     *
+     * The window's origin has to enter through [windowStart] rather than being assumed to be zero:
+     * a viewport whose [ViewportRect.left] / [ViewportRect.top] is not the origin would otherwise be
+     * measured against the wrong span, and the picture would be free to leave a gap along the edge
+     * the window does not start at. Every caller in the app happens to build an origin-anchored
+     * viewport, so this changes no result today; it just makes the arithmetic say what it means.
      *
      * While the scaled content is no bigger than the window there is nothing to clamp, and
-     * returning zero there is what keeps the letterboxed axis centred at every zoom level.
+     * returning zero there is what keeps the letterboxed axis centred at every zoom level — that
+     * branch needs no window origin, because [fitRect] already centres the content in the viewport.
      */
     private fun clampAxis(
         offset: Float,
         scale: Float,
         center: Float,
+        windowStart: Float,
         windowSpan: Float,
         contentStart: Float,
         contentSpan: Float,
@@ -187,6 +198,14 @@ object Viewports {
         val scaledSpan = scale * contentSpan
         if (scaledSpan <= windowSpan) return 0f
         val leadingEdge = (1f - scale) * center + scale * contentStart
-        return offset.coerceIn(windowSpan - scaledSpan - leadingEdge, -leadingEdge)
+        // The bounds are `windowStart + windowSpan - scaledSpan - leadingEdge` and
+        // `windowStart - leadingEdge`; the upper one is written as the negation of a difference
+        // because for an origin-anchored window (`windowStart == 0f`) that is bit-for-bit the
+        // expression this axis used before the origin was threaded through, down to the sign of a
+        // zero bound. The two forms only differ where both are zero.
+        return offset.coerceIn(
+            windowStart + windowSpan - scaledSpan - leadingEdge,
+            -(leadingEdge - windowStart),
+        )
     }
 }

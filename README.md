@@ -164,7 +164,7 @@ layer.
 
 ## Tests
 
-99 unit tests, all runnable on a plain JVM:
+130 unit tests, all runnable on a plain JVM:
 
 ```bash
 ./gradlew :app:testDebugUnitTest

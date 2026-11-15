@@ -1,7 +1,12 @@
 package com.kscanner.ui.camera
 
 import android.Manifest
+import android.app.Activity
+import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
@@ -14,6 +19,7 @@ import androidx.camera.view.PreviewView
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,9 +36,14 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.outlined.RotateRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.outlined.CreditCard
+import androidx.compose.material.icons.outlined.Flip
 import androidx.compose.material.icons.outlined.FlashOff
 import androidx.compose.material.icons.outlined.FlashOn
 import androidx.compose.material.icons.outlined.GridOn
@@ -67,12 +78,17 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.foundation.Image
 import com.kscanner.core.imaging.CaptureAdvice
 import com.kscanner.core.imaging.CaptureGate
 import com.kscanner.data.ScanMode
+import com.kscanner.ui.capture.ReviewState
 import com.kscanner.ui.capture.ScanSessionViewModel
+import com.kscanner.ui.components.rememberFileImage
 import android.os.Handler
 import android.os.Looper
 import java.util.concurrent.Executors
@@ -96,8 +112,7 @@ fun CameraScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
 
     LaunchedEffect(Unit) {
-        session.prepare(initialMode)
-        session.beginInto(documentId)
+        session.prepareIfNeeded(initialMode, documentId)
     }
 
     var hasPermission by remember {
@@ -107,12 +122,33 @@ fun CameraScreen(
         )
     }
     var permissionRequested by remember { mutableStateOf(false) }
+    // Whether the system would still put the dialog up. This is *not* the question
+    // `permissionRequested` answers: after a permanent denial it stays false for good, which is
+    // the one case where the only way out of this screen is the app's page in Settings.
+    var canAskAgain by remember { mutableStateOf(true) }
+
+    fun readPermissionState() {
+        hasPermission = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+            PackageManager.PERMISSION_GRANTED
+        canAskAgain = hasPermission || (context as? Activity)?.let { activity ->
+            ActivityCompat.shouldShowRequestPermissionRationale(activity, Manifest.permission.CAMERA)
+        } ?: true
+    }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
-    ) { granted ->
-        hasPermission = granted
+    ) { _ ->
         permissionRequested = true
+        readPermissionState()
+    }
+
+    // Coming back from Settings must start the preview, not leave this screen up as a dead end.
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) readPermissionState()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     LaunchedEffect(Unit) {
@@ -122,7 +158,9 @@ fun CameraScreen(
     if (!hasPermission) {
         PermissionScreen(
             denied = permissionRequested,
-            onRequest = { permissionLauncher.launch(Manifest.permission.CAMERA) },
+            permanentDenial = permissionRequested && !canAskAgain,
+            onGrant = { permissionLauncher.launch(Manifest.permission.CAMERA) },
+            onOpenSettings = { openAppSettings(context) },
             onClose = onClose,
         )
         return
@@ -378,7 +416,9 @@ fun CameraScreen(
                 modifier = Modifier.padding(bottom = 12.dp),
             )
 
-            // Page strip for the continuous modes: a glance at what has landed so far.
+            // Page strip for the continuous modes: a glance at what has landed so far, and the
+            // way into the review. Newest commit first, and within a commit in reading order,
+            // so a tile carries its own page number rather than counting back from the front.
             if (session.mode.isContinuous && session.recent.isNotEmpty()) {
                 LazyRow(
                     modifier = Modifier
@@ -386,14 +426,20 @@ fun CameraScreen(
                         .padding(bottom = 10.dp),
                     horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
                 ) {
-                    items(session.recent) { thumb ->
+                    items(session.recent) { tile ->
+                        val number = tile.number
+                        val total = session.pageCount
                         Image(
-                            bitmap = thumb,
-                            contentDescription = null,
-                            contentScale = ContentScale.Crop,
+                            bitmap = tile.bitmap,
+                            // Fit, not Crop: a tile must show the whole page, not a cut-out of it.
+                            contentDescription = "Page $number of $total",
+                            contentScale = ContentScale.Fit,
                             modifier = Modifier
-                                .size(46.dp)
-                                .clip(RoundedCornerShape(6.dp)),
+                                .size(48.dp, 64.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .clickable(
+                                    onClickLabel = "Open page $number of $total",
+                                ) { session.openReview(tile.pageId) },
                         )
                     }
                 }
@@ -486,6 +532,152 @@ fun CameraScreen(
                 }
             }
         }
+
+        // The review is an overlay on this screen, not a route of its own: leaving would
+        // re-run the init effect above and wipe the run in progress.
+        session.review?.let { state ->
+            ReviewOverlay(
+                state = state,
+                error = session.error,
+                onClose = session::closeReview,
+                onStep = session::stepReview,
+                onRotate = { session.rotateReviewPage(clockwise = true) },
+                onFlip = session::flipReviewPage,
+            )
+        }
+    }
+}
+
+/**
+ * The full-bleed review of a run: what was committed, page by page, with the rotate and
+ * flip the automatic pass may have got wrong. Reads the stored rows through
+ * [ScanSessionViewModel.review], so it can reach page 1 of a run longer than the strip.
+ */
+@Composable
+private fun ReviewOverlay(
+    state: ReviewState,
+    error: String?,
+    onClose: () -> Unit,
+    onStep: (Int) -> Unit,
+    onRotate: () -> Unit,
+    onFlip: () -> Unit,
+) {
+    val page = state.current
+    val image = rememberFileImage(page?.processedPath, maxEdge = 1800, revision = page?.renderRevision)
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black),
+    ) {
+        if (image != null) {
+            Image(
+                bitmap = image,
+                contentDescription = page?.let { "Page ${state.index + 1} of ${state.pages.size}" },
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(vertical = 88.dp),
+            )
+        } else {
+            CircularProgressIndicator(
+                color = Color.White,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .size(28.dp),
+            )
+        }
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .align(Alignment.TopCenter)
+                .padding(horizontal = 8.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(onClick = onClose) {
+                Icon(
+                    Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Close review",
+                    tint = Color.White,
+                )
+            }
+            Text(
+                text = state.position,
+                color = Color.White,
+                style = MaterialTheme.typography.titleMedium,
+            )
+            Spacer(Modifier.weight(1f))
+            IconButton(onClick = onRotate) {
+                Icon(Icons.AutoMirrored.Outlined.RotateRight, contentDescription = "Rotate this page", tint = Color.White)
+            }
+            IconButton(onClick = onFlip) {
+                Icon(Icons.Outlined.Flip, contentDescription = "Turn this page over", tint = Color.White)
+            }
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .align(Alignment.BottomCenter)
+                .padding(horizontal = 12.dp, vertical = 16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            // Only `false` earns this: null means no plan ran, and accusing such a page of
+            // being undecided would be inventing doubt the app never had.
+            if (page?.flipDecided == false) {
+                Surface(
+                    onClick = onFlip,
+                    shape = RoundedCornerShape(20.dp),
+                    color = Color.White.copy(alpha = 0.16f),
+                    contentColor = Color.White,
+                    modifier = Modifier.padding(bottom = 14.dp),
+                ) {
+                    Text(
+                        text = "Upside down? The automatic pass could not tell",
+                        style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                    )
+                }
+            }
+
+            error?.let { message ->
+                Text(
+                    text = message,
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(bottom = 10.dp),
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(
+                    onClick = { onStep(-1) },
+                    enabled = state.index > 0,
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.KeyboardArrowLeft,
+                        contentDescription = "Previous page",
+                        tint = if (state.index > 0) Color.White else Color.White.copy(alpha = 0.35f),
+                    )
+                }
+                IconButton(
+                    onClick = { onStep(1) },
+                    enabled = state.index < state.pages.lastIndex,
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = "Next page",
+                        tint = if (state.index < state.pages.lastIndex) Color.White
+                        else Color.White.copy(alpha = 0.35f),
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -535,7 +727,13 @@ private fun ZoomChip(label: String, active: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-private fun PermissionScreen(denied: Boolean, onRequest: () -> Unit, onClose: () -> Unit) {
+private fun PermissionScreen(
+    denied: Boolean,
+    permanentDenial: Boolean,
+    onGrant: () -> Unit,
+    onOpenSettings: () -> Unit,
+    onClose: () -> Unit,
+) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -553,20 +751,38 @@ private fun PermissionScreen(denied: Boolean, onRequest: () -> Unit, onClose: ()
         Text("Camera access is needed", style = MaterialTheme.typography.titleMedium)
         Spacer(Modifier.height(8.dp))
         Text(
-            text = if (denied) {
-                "KScanner needs the camera to scan documents. You can grant it in Settings, or import pages from your gallery instead."
-            } else {
-                "KScanner uses the camera to photograph documents for scanning."
+            text = when {
+                permanentDenial ->
+                    "Camera access is blocked, so KScanner cannot ask again. Allow the camera in the app's settings, or import pages from your gallery instead."
+                denied ->
+                    "KScanner needs the camera to scan documents. You can grant it in Settings, or import pages from your gallery instead."
+                else ->
+                    "KScanner uses the camera to photograph documents for scanning."
             },
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(24.dp))
-        Button(onClick = onRequest) { Text("Allow camera") }
+        // One primary action, whichever route can still work: the OS dialog while it will still
+        // appear, and the app's settings page once it has stopped appearing for good.
+        if (permanentDenial) {
+            Button(onClick = onOpenSettings) { Text("Open settings") }
+        } else {
+            Button(onClick = onGrant) { Text("Allow camera") }
+        }
         Spacer(Modifier.height(8.dp))
         Button(
             onClick = onClose,
             colors = ButtonDefaults.textButtonColors(),
         ) { Text("Not now") }
     }
+}
+
+/** The app's own page in system Settings: the only route back from a permanent denial. */
+private fun openAppSettings(context: Context) {
+    val intent = Intent(
+        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+        Uri.fromParts("package", context.packageName, null),
+    )
+    runCatching { context.startActivity(intent) }
 }

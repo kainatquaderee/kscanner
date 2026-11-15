@@ -30,7 +30,22 @@ data class Page(
     val width: Int,
     val height: Int,
     val createdAt: Long,
-)
+    /**
+     * Whether the automatic pass could decide the 0-versus-180 flip, or null when no plan
+     * ran for this page (an import, a page written before the flag existed).
+     *
+     * Null is *not* the same as false: a page that predates the flag must never be shown as
+     * one the app could not orient. Only `false` earns the review's "could not tell" prompt.
+     */
+    val flipDecided: Boolean? = null,
+) {
+    /**
+     * Moves whenever the bytes at [processedPath] are rewritten in place — a rotation or a
+     * filter change. A decode cache keys on it beside the file's own length and mtime, which
+     * can miss a same-length rewrite inside one timestamp tick.
+     */
+    val renderRevision: Int get() = rotation * 1000 + filterId
+}
 
 enum class DocumentSort(val label: String) {
     DATE_DESC("Newest"),

@@ -4,6 +4,7 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 /**
  * Whole-page orientation: is this capture upright, sideways or upside down?
@@ -46,12 +47,24 @@ object Orientation {
          * would hide the pages that most need the tap.
          */
         val flipDecided: Boolean = false,
+        /**
+         * Why the 0-versus-180 choice came out the way it did. Carried so a caller can say *why*
+         * a page was left as captured: a page with no reading at all is a different thing to a
+         * reading too small to believe, and only the first is worth asking the user about.
+         */
+        val flipReason: FlipReason = FlipReason.ONE_SIDE_ABSTAINED,
     )
 
     val UPRIGHT: Estimate = Estimate(0, 0.0, 0.0, 0.0)
 
     /** Margin a flip must clear when three or more bands voted. */
     private const val FLIP_MARGIN = 0.02
+
+    /** Cut that finds a line's x-height core, as it always has. */
+    private const val CORE_CUT = 0.30
+
+    /** Rows below this fraction of the peak are paper, not line: the growth floor. */
+    private const val SKIRT_CUT = 0.03
 
     /**
      * Margin when only two bands voted. Two centroids average less of the noise that makes
@@ -60,6 +73,12 @@ object Orientation {
      * displacement keeps the extra sensitivity honest.
      */
     private const val SPARSE_FLIP_MARGIN = 0.03
+
+    /**
+     * Band readings scatter 0.02-0.07 of band height (see [MIN_AGREEING_BANDS]); 0.05 is that
+     * scatter when a candidate has too few readings to measure its own.
+     */
+    private const val BAND_SIGMA_FLOOR = 0.05
 
     /**
      * Fewest bands that must agree before their displacement may decide a flip.
@@ -139,48 +158,167 @@ object Orientation {
         // clear. A page that is genuinely upside down still gets corrected; one whose bands
         // are symmetric (a table, a barcode) is left as captured.
         //
-        // A sparse page raises two bands' word to the same standing as a page of prose, so
-        // it has to clear a wider margin to be believed. The weaker of the two readings
-        // sets the margin, because the pair's profiles are mirror images and the count that
-        // proves least is the one that should govern.
-        val evidenceBands = min(pair[0].bias.bands, pair[1].bias.bands)
-        val flipMargin = if (evidenceBands >= 3) FLIP_MARGIN else SPARSE_FLIP_MARGIN
-        val flipGap = pair[1].bias.value - pair[0].bias.value
-        val flipDecided = abs(flipGap) > flipMargin
-        val chosen = if (flipGap > flipMargin) pair[1] else pair[0]
+        // A sparse page raises two bands' word to the same standing as a page of prose, so it has
+        // to clear a wider margin to be believed. A candidate that produced no reading at all
+        // cannot decide the flip and cannot relax the margin: see [decideFlip].
+        val decision = decideFlip(pair[0].bias.evidence(), pair[1].bias.evidence())
+        val chosen = if (decision.flip) pair[1] else pair[0]
+        val flipDecided = decision.decided
         val runnerUpScore = if (useVertical) horizontalScore else verticalScore
         val axisMargin = if (chosen.score <= 0.0) 0.0 else {
             ((chosen.score - runnerUpScore) / chosen.score).coerceIn(0.0, 1.0)
         }
 
-        val flipConfidence = (abs(flipGap) / 0.10).coerceIn(0.0, 1.0)
+        val flipConfidence = (abs(decision.gap) / 0.10).coerceIn(0.0, 1.0)
 
         val confidence = (axisMargin * 0.7 + flipConfidence * 0.3).coerceIn(0.0, 1.0)
-        return Estimate(chosen.rotation, confidence, chosen.score, chosen.bias.value, flipDecided)
+        return Estimate(
+            chosen.rotation,
+            confidence,
+            chosen.score,
+            chosen.bias.value,
+            flipDecided,
+            decision.reason,
+        )
     }
 
     private data class Candidate(val rotation: Int, val score: Double, val bias: Bias)
 
     /**
      * How far a frame's ink sits below the centre of its text bands, in units of band
-     * height, and how many bands carried that evidence.
+     * height, how many bands carried that evidence, and the scatter of those readings.
      *
      * The count is what tells a page of prose apart from a page with a couple of lines on
      * it, and the caller needs it to pick a margin it can defend; a value of [Bias.NONE]
-     * means the frame offered no evidence at all.
+     * means the frame offered no evidence at all. That is why [measured] exists rather than
+     * comparing [value] with zero: no reading and a reading of 0.0 are different things, and
+     * only one of them may decide a flip.
      */
-    private class Bias(val value: Double, val bands: Int) {
+    private class Bias(
+        val value: Double,
+        val bands: Int,
+        val samples: Int,
+        val sumSquares: Double,
+    ) {
+        /** False ⇒ this candidate has no reading at all, not a reading of zero. */
+        val measured: Boolean get() = bands >= 1
+
+        fun evidence() = FlipEvidence(value, bands, samples, sumSquares)
+
         companion object {
-            val NONE = Bias(0.0, 0)
+            val NONE = Bias(0.0, 0, 0, 0.0)
         }
+    }
+
+    /** What one 0-versus-180 candidate had to say, in the form [decideFlip] reads. */
+    data class FlipEvidence(
+        val mean: Double,
+        val bands: Int,
+        val samples: Int,
+        val sumSquares: Double,
+    ) {
+        /** False ⇒ this candidate has no reading at all, not a reading of zero. */
+        val measured: Boolean get() = bands >= 1
+
+        companion object {
+            val NONE = FlipEvidence(0.0, 0, 0, 0.0)
+        }
+    }
+
+    /** Why [decideFlip] came out the way it did. */
+    enum class FlipReason { FLIPPED, KEPT, ONE_SIDE_ABSTAINED, BELOW_NOISE }
+
+    /** The whole 0-versus-180 decision, with the numbers it was made on. */
+    data class FlipDecision(
+        /** True ⇒ turn the frame 180 degrees. */
+        val flip: Boolean,
+        /** False ⇒ no evidence; leave the frame as captured. */
+        val decided: Boolean,
+        val reason: FlipReason,
+        /** [FlipEvidence.mean] of the turned candidate minus that of the as-captured one. */
+        val gap: Double,
+        /** The margin [gap] had to clear. */
+        val margin: Double,
+        /** From the readings' own scatter. */
+        val standardError: Double,
+    )
+
+    /**
+     * The 0-versus-180 decision, pure and whole: no mask, no profile, no image.
+     *
+     * The rules, in the order they apply — a change to any of them is a behaviour change:
+     *
+     *  1. A candidate that produced no reading abstains. It can never decide the flip and it
+     *     never relaxes the margin for the other side, which is what stops one member's
+     *     silence from letting the other member's reading turn the page on its own.
+     *  2. A candidate carrying fewer than three bands only gets two bands' word, so the
+     *     margin widens to [SPARSE_FLIP_MARGIN].
+     *  3. The gap has to clear the margin strictly, and a flip needs the gap on the positive
+     *     side; a gap the wrong way is a decision to keep the frame as captured.
+     *
+     * The readings' scatter is reported in [FlipDecision.standardError] but does not raise the
+     * margin: see the kill criterion note inside [decideFlip].
+     */
+    fun decideFlip(asCaptured: FlipEvidence, turned: FlipEvidence): FlipDecision {
+        val gap = turned.mean - asCaptured.mean
+        val bandMargin = if (min(asCaptured.bands, turned.bands) >= 3) {
+            FLIP_MARGIN
+        } else {
+            SPARSE_FLIP_MARGIN
+        }
+        if (!asCaptured.measured || !turned.measured) {
+            // No scatter can be computed from a candidate that produced no readings, and none
+            // is needed: the abstention decides the outcome on its own.
+            return FlipDecision(
+                flip = false,
+                decided = false,
+                reason = FlipReason.ONE_SIDE_ABSTAINED,
+                gap = gap,
+                margin = bandMargin,
+                standardError = 0.0,
+            )
+        }
+
+        val standardError = sqrt(
+            standardErrorOf(asCaptured) * standardErrorOf(asCaptured) +
+                standardErrorOf(turned) * standardErrorOf(turned),
+        )
+        // KILL CRITERION APPLIED (§2.1): the noise guard is deleted and [bandMargin] alone
+        // decides. Measured on the tester's prose fixture, the gap the cue produces is 0.0189
+        // against a guard of 0.0244, so the guard re-created the false negative it was meant to
+        // bound — the exact regression §2.1 says must not ship. [standardError] is still
+        // reported so a caller (and the tests) can see the scatter the margin no longer uses.
+        val margin = bandMargin
+        val decided = abs(gap) > margin
+        val flip = decided && gap > margin
+        val reason = when {
+            !decided -> FlipReason.BELOW_NOISE
+            flip -> FlipReason.FLIPPED
+            else -> FlipReason.KEPT
+        }
+        return FlipDecision(flip, decided, reason, gap, margin, standardError)
+    }
+
+    /** Standard error of one candidate's mean, from the readings' own scatter. */
+    private fun standardErrorOf(evidence: FlipEvidence): Double {
+        if (evidence.samples <= 0) return 0.0
+        val sigma = if (evidence.samples >= 2) {
+            sqrt(evidence.sumSquares / (evidence.samples - 1))
+        } else {
+            BAND_SIGMA_FLOOR
+        }
+        return sigma / sqrt(evidence.samples.toDouble())
     }
 
     /**
      * Mean displacement of each text band's ink centroid from the band centre, in units of
-     * band height. Only bands that agree with the majority are counted, so a stray artefact
-     * cannot outvote the text.
+     * band height, and the number of bands that carried that evidence.
      *
-     * @param minInk rejected unless the bands that voted carry at least this much ink.
+     * Every band that holds ink contributes to the mean; the earlier claim that only bands
+     * agreeing with the majority were counted was never true of the arithmetic, and the
+     * majority is what [MIN_AGREEING_BANDS] and the margin are for.
+     *
+     * @param minInk rejected unless the bands that carried ink hold at least this much.
      */
     private fun flipBias(profile: IntArray, minInk: Double): Bias {
         val peak = profile.maxOrNull() ?: 0
@@ -189,11 +327,11 @@ object Orientation {
         // Relax the cut until there are enough bands for a majority to mean something. It
         // never drops below a tenth of the peak: past that the gaps between lines fill in
         // and the "bands" are no longer lines of text.
-        var cutFraction = 0.30
-        var bands = bands(profile, cutFraction)
+        var cutFraction = CORE_CUT
+        var bands = textBands(profile, cutFraction)
         while (bands.size < 3 && cutFraction > 0.10) {
             cutFraction -= 0.05
-            bands = bands(profile, cutFraction)
+            bands = textBands(profile, cutFraction)
         }
 
         val biases = ArrayList<Double>(bands.size)
@@ -224,15 +362,67 @@ object Orientation {
         var positive = 0
         var negative = 0
         var sum = 0.0
+        var sumSquares = 0.0
         for (b in biases) {
             sum += b
+            sumSquares += b * b
             if (b > 0.01) positive++
             if (b < -0.01) negative++
         }
         val agreeing = max(positive, negative)
         if (agreeing < MIN_AGREEING_BANDS || agreeing * 2 < biases.size) return Bias.NONE
-        return Bias(sum / biases.size, agreeing)
+        return Bias(sum / biases.size, agreeing, biases.size, sumSquares)
     }
+
+    /**
+     * One row range per line of print: the [coreCut] cores grown outward to the valley that
+     * separates them, so the ascenders and descenders the cue reads (see the class KDoc) are
+     * inside the band rather than cut away by it.
+     *
+     * The cores are where the profile is at least [coreCut] of its peak, which isolates the
+     * x-height run and discards the very evidence the cue depends on: the ascender and
+     * descender rows carry far less mass than the x-height run, so any single cut that finds
+     * the x-height also hides them. They are recovered by growing each core outward while the
+     * profile is still descending — the descent into the inter-line gap is the boundary that
+     * separates one line of print from the paper, so no third threshold and no per-font
+     * tuning is needed — and never past [skirt] of the peak, which is paper.
+     *
+     * Growth also stops at the midpoint to the neighbouring core, so two lines whose skirts
+     * meet on tight leading split at the valley between them instead of swallowing each
+     * other. A band can therefore absorb a sliver of its neighbour's skirt, which moves the
+     * mean by a fraction of that skirt rather than destroying the sign.
+     */
+    internal fun textBands(
+        profile: IntArray,
+        coreCut: Double = CORE_CUT,
+        skirt: Double = SKIRT_CUT,
+    ): List<IntRange> {
+        val peak = profile.maxOrNull() ?: 0
+        if (peak <= 0) return emptyList()
+        val cores = bands(profile, coreCut)
+        if (cores.isEmpty()) return emptyList()
+        val floor = max(1, (peak * skirt).roundToInt())
+
+        val result = ArrayList<IntRange>(cores.size)
+        for (i in cores.indices) {
+            val core = cores[i]
+            // Rows strictly between the cores go to the one above; the cap is what keeps two
+            // grown bands from overlapping when the valley between them carries ink.
+            val upCap = if (i == 0) 0 else (cores[i - 1].last + core.first) / 2 + 1
+            val downCap = if (i == cores.size - 1) profile.size - 1 else (core.last + cores[i + 1].first) / 2
+
+            var first = core.first
+            while (first > upCap && growsOutward(profile, first - 1, profile[first], floor)) first--
+            var last = core.last
+            while (last < downCap && growsOutward(profile, last + 1, profile[last], floor)) last++
+            result.add(first..last)
+        }
+        return result
+    }
+
+    /** True while [outer] is still part of the line inside it: descending, and not paper. */
+    private fun growsOutward(profile: IntArray, outer: Int, inner: Int, floor: Int): Boolean =
+        profile[outer] >= floor && profile[outer] < inner
 
     /** Contiguous index ranges where the profile rises above a fraction of its peak. */
     private fun bands(profile: IntArray, fraction: Double): List<IntRange> {

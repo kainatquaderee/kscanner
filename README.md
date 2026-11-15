@@ -4,19 +4,25 @@ An Android document scanner: photograph a page, have its edges found automatical
 the crop to a true rectangle, clean up the look, stack pages into a document, recognise the
 text on-device, and export a searchable PDF.
 
-Written from scratch in Kotlin and Jetpack Compose. The entire imaging pipeline, the PDF
-writer and the OCR text codec are plain JVM code with no Android dependencies, so the exact
-algorithms that ship are the ones covered by the unit tests.
+Written from scratch in Kotlin and Jetpack Compose. The imaging engine, the PDF writer and
+the OCR text codec are plain JVM code: a single file, `BitmapBridge`, touches
+`android.graphics` to decode and encode, and everything else runs without Android, so the
+algorithms that ship are covered by the unit tests rather than by a device.
 
 ## Features
 
 **Capture**
-- CameraX preview with 3×3 composition grid, torch toggle and 1×/2×/4× zoom
+- CameraX preview with a 3×3 composition grid, torch toggle, and zoom chips at 1× and 2×,
+  plus 4× where the camera's zoom range reaches it
 - Four capture modes, chosen from a chip row over the viewfinder:
   - **Single** — one shot handed to the editor for manual corner adjustment
   - **Batch** — shoot pages back to back; each is detected, straightened and appended
   - **Book** — photograph a two-page spread and get the two pages cut along the gutter
   - **ID card** — capture the front, then the back; both sides are laid out on one sheet
+- In batch, book and ID-card capture, a strip of what has landed so far sits under the
+  shutter. Tapping a page opens the **review**: step through what the run has committed so
+  far, rotate one page a quarter turn, flip one over, and see — on the page itself — which
+  pages the automatic orientation pass could not decide
 - Optional **automatic shutter**: the camera measures each preview frame and fires when the
   page is sharp, evenly lit and has stayed that way for several frames (a filling ring shows
   the wait). It is deliberately unhurried so it does not fire at a half-settled hand.
@@ -35,9 +41,17 @@ algorithms that ship are the ones covered by the unit tests.
 - Automatic orientation (upright / sideways / upside down) decided from the line axis and,
   conservatively, the ink distribution inside each text band — read from a *levelled* copy of
   the page, because a degree or two of residual tilt smears a text band by about its own
-  height and quietly inverts the cue that tells a page from the same page turned over. A page
-  whose bands carry no evidence is left as captured rather than guessed at, and says so
-  through `AutoCrop.Plan.flipDecided`
+  height and quietly inverts the cue that tells a page from the same page turned over. Each
+  band is now grown out from its x-height core to the valley that separates it from the next
+  line, up to the point where the row profile is paper again, so the ascender and descender
+  rows that carry the cue sit inside the band instead of being cut away by a fixed threshold —
+  which is why a page that arrives upside down is turned back upright in far more cases than
+  it used to be
+- That cue has a limit, and the app reports it rather than guessing. On dense prose with
+  little typographic asymmetry the reading sits too close to its own scatter to trust, at
+  every affordable working resolution, and no threshold fixes that: a page in that state is
+  left as captured, `AutoCrop.Plan.flipDecided` is false, `AutoCrop.Plan.flipReason` records
+  that the pass could not tell, and the review marks the page and offers a one-tap flip
 - Automatic deskew: the residual lean of the text is measured on the *cropped page* and
   rotated out, so a background table edge cannot vote on it
 - Drag any of the four corners to fine-tune; the outline rotates with the image and refuses
@@ -67,9 +81,22 @@ algorithms that ship are the ones covered by the unit tests.
 **Library**
 - Grid library with cover thumbnails, page counts, sizes and OCR indicators
 - Search across document names *and* recognised text
-- Sort by date, name or size; group into folders
-- Multi-select for bulk rename and delete
+- Sort by newest, oldest, name or size
+- Multi-select: delete several documents at once, after a confirmation that says how many and
+  what goes with them; rename applies to the one document selected
 - Reorder pages, rotate pages, delete pages
+- An import says what happened — "Imported 3 of 5 — 2 could not be read" — instead of losing
+  the failures silently
+
+**App and settings**
+- The installed version is read from the package and shown in Settings, rather than typed
+  into a label that then drifts
+- Search and sort live in the view model, so the library shows the query and order that are
+  actually filtering the list
+- With the camera permission permanently denied, the screen offers a route into the app's
+  system settings and re-checks the permission on return instead of dead-ending
+- Back and page-step arrows use the auto-mirrored icons, so they point the right way in a
+  right-to-left layout
 
 Everything is stored in app-private storage. There is no analytics and no account. The only
 platform permissions the built APK declares are `CAMERA`, `READ_MEDIA_IMAGES`, and
@@ -78,9 +105,11 @@ platform permissions the built APK declares are `CAMERA`, `READ_MEDIA_IMAGES`, a
 permission added by `androidx.core` that no other app can hold.
 
 ML Kit's transitive Play Services dependencies declare `INTERNET` and
-`ACCESS_NETWORK_STATE`; both are explicitly removed in the manifest with
-`tools:node="remove"`, because the bundled text recogniser runs entirely on device. You can
-confirm this on any build:
+`ACCESS_NETWORK_STATE` (`transport-backend-cct`, and `transport-runtime` for the latter); both
+are explicitly removed in the manifest with `tools:node="remove"`, because the bundled text
+recogniser runs entirely on device. Neither permission survives merging — Gradle's
+`manifest-merger-*-report.txt` lists them as rejected from those libraries, and the merged
+manifest contains no `INTERNET` at all. You can confirm this on any build:
 
 ```bash
 aapt2 dump badging app/build/outputs/apk/debug/app-debug.apk | grep uses-permission
@@ -103,22 +132,29 @@ The debug APK lands at `app/build/outputs/apk/debug/app-debug.apk`.
 ## Releases
 
 Signed APKs are published on the [Releases page](https://github.com/kainatquaderee/kscanner/releases).
-Each one is built from a tag, so you can reproduce it locally:
+Each release is built from a tag. You can build the same version from that tag yourself:
 
 ```bash
 git clone https://github.com/kainatquaderee/kscanner
 cd kscanner
-git checkout v1.0.0
+git checkout v1.4.0                       # the tag you want to build
 echo "sdk.dir=$ANDROID_HOME" > local.properties
-./gradlew :app:assembleRelease
-sha256sum app/build/outputs/apk/release/app-release.apk
+./gradlew :app:assembleRelease -PversionName=1.4.0 -PversionCode=10400
+aapt2 dump badging app/build/outputs/apk/release/app-release.apk | sed -n 1p
 ```
 
-Every release is signed with APK Signature Scheme v2 and v3. Check that a downloaded APK
-really came from this project by comparing certificate digests:
+`-PversionName` and `-PversionCode` are required: without them the build falls back to `1.0.0`
+and `1`, which is not a released version. The APK is **not byte-identical** to the published
+one — the release is signed with a key that is not in this repository, and the packaging step is
+not reproducible byte for byte, so `sha256sum` will not match.
+
+Every release is signed with APK Signature Scheme v2 and v3. The published download is named
+after the version (`kscanner-1.4.0.apk`); confirm it really came from this project by comparing
+signing certificates — the certificate, not a checksum of the file, is what Android compares
+when it installs an update:
 
 ```bash
-apksigner verify --print-certs app-release.apk
+apksigner verify --print-certs kscanner-1.4.0.apk
 # Signer #1 certificate SHA-256 digest: b98924a5ba364b67ac61837550e3d2845e3b1c05ac95a42bdeb95230638066fd
 ```
 
@@ -141,7 +177,8 @@ core/imaging    framework-free imaging engine (pixels in, pixels out)
   Segmentation  ink/bright masks, connected components, convex hull, min-area rect, profiles
   DocDetector   the multi-stage page outline search and its cascade of fallbacks
   Skew          projection-profile tilt search (coarse then fine)
-  Orientation   line-axis decision plus a conservative upside-down cue
+  Orientation   line-axis decision plus a conservative upside-down cue, band extents grown
+                from each line's core, and the record of when it declined to decide
   Quality       sharpness, exposure, glare, illumination ramp and capture advice
   AutoCrop      outline first, then orientation and skew measured inside it
   Spread        cut a book spread along its gutter into two pages
@@ -154,6 +191,7 @@ core/imaging    framework-free imaging engine (pixels in, pixels out)
 
 core/pdf        hand-written PDF 1.4 writer with an invisible OCR text layer
 core/ocr        OCR line model, storage codec, ML Kit wrapper
+core/io         the decode-cache key for a page file: path, length and modified time
 data            SQLite store, file layout, settings, ScanRepository
 ui              Compose screens (library, camera, editor, document, viewer, settings)
   capture       ScanSessionViewModel: drives batch, book and ID-card capture
@@ -166,7 +204,7 @@ layer.
 
 ## Tests
 
-130 unit tests, all runnable on a plain JVM:
+169 unit tests in 18 classes, all runnable on a plain JVM:
 
 ```bash
 ./gradlew :app:testDebugUnitTest
@@ -178,14 +216,41 @@ layers (skew, orientation, quality, segmentation and the automatic shutter), the
 split and the ID-card composite, the filter presets, the OCR text codec's escaping
 round-trips, and PDF structure — including xref byte offsets, declared stream lengths, page
 counts and text-layer placement, and the editor's viewport zoom and pan arithmetic in
-`core/imaging/PreviewViewport.kt`. One test writes a real multi-page PDF to
-`app/build/verification/` so it can be checked with external tooling:
+`core/imaging/PreviewViewport.kt`. The orientation work is pinned by tests at two levels: the
+band extents and the 0-versus-180 decision as plain functions, and a contract that walks
+realistic prose fixtures — uneven light, a shadowed half, rules, underlines, a stamp, a
+signature — asserting that an upside-down page is either turned back upright or reported as
+undecided, never left upside down while claiming to have decided. One test writes a real
+multi-page PDF to `app/build/verification/` so it can be checked with external tooling:
 
 ```bash
 pdfinfo app/build/verification/ocr-sample.pdf
 pdftotext app/build/verification/ocr-sample.pdf -
 pdftoppm -png app/build/verification/ocr-sample.pdf page
 ```
+
+## Known issues
+
+True of v1.4.0, stated rather than hidden:
+
+- **Folder grouping and bulk rename are not reachable in the UI.** The `documents` table has a
+  `folder` column, `DocumentStore.listFolders` can read it and `ScanRepository.moveDocument`
+  can set one, but nothing in the interface ever calls `moveDocument`, so the folder chips in
+  the library never have a folder to show. Rename is offered only when exactly one document is
+  selected (`LibraryScreen.kt:510`), so there is no bulk rename. Both are held back for a later
+  release rather than half-exposed.
+- **The editor's Detect action discards a manual rotation.** "Detect automatically" re-runs the
+  whole automatic pass, and that pass assigns the rotation it decided
+  (`EditorViewModel.kt:194`), so a quarter turn applied by hand before the tap is replaced by
+  the detector's choice.
+- **Rotating a page does not invalidate stored OCR line boxes.** `ScanRepository.rotateBy`
+  rewrites the page image, its corners and its width and height, but leaves `ocr_text` and
+  `ocr_lines` untouched — and the boxes are in the pixel coordinates of the image they were
+  read from. The recognised text still reads correctly; a searchable PDF exported after a
+  rotation can place its invisible text layer against pixels that have since moved. Running
+  OCR on the page again stores fresh boxes.
+- **`StorageManager.sweepCaptures` is not wired up.** Scratch captures under
+  `cacheDir/captures` are written and never swept; the method exists and has no caller.
 
 ## Licence
 

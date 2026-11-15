@@ -24,9 +24,15 @@
         android:name="android.permission.ACCESS_NETWORK_STATE"
         tools:node="remove" />
 
+    <!--
+        Backup is off. The library, the thumbnails and the OCR text database are the user's
+        own documents, and Settings tells them their scans stay on this device; a cloud backup
+        that carried those files would contradict that. So nothing here is eligible for Auto
+        Backup or for device-to-device transfer.
+    -->
     <application
         android:name=".KScannerApp"
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:largeHeap="true"

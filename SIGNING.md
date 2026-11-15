@@ -8,7 +8,7 @@ B9:89:24:A5:BA:36:4B:67:AC:61:83:75:50:E3:D2:84:5E:3B:1C:05:AC:95:A4:2B:DE:B9:52
 ```
 
 Users can confirm a download came from this project by comparing that digest against
-`apksigner verify --print-certs app-release.apk`.
+`apksigner verify --print-certs kscanner-1.4.0.apk` on the published asset.
 
 ## How the build finds the key
 
@@ -82,8 +82,8 @@ broken-signature build can never be published.
 ## Cutting a release
 
 ```bash
-git tag v1.2.0
-git push origin v1.2.0
+git tag v1.4.0
+git push origin v1.4.0
 ```
 
 Tags must be `vMAJOR.MINOR.PATCH`. Both version fields come from the tag, so rebuilding a

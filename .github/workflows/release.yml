@@ -147,7 +147,11 @@ jobs:
           # silently ignored property would publish an APK with the checked-in default
           # version, which is how versionCode 1 slipped into the first release.
           AAPT2=$(ls -1 "$ANDROID_HOME"/build-tools/*/aapt2 | sort -V | tail -1)
-          BADGING=$("$AAPT2" dump badging "$APK" 2>/dev/null | head -1)
+          # `sed -n 1p` and not `| head -1`: head exits the moment it has its line, and the
+          # SIGPIPE that gives aapt2 is reported by `pipefail` as a failed step even though the
+          # APK is perfectly good. Whether it trips depends on who wins the race, which is what
+          # makes it a release-time flake rather than a build error.
+          BADGING=$("$AAPT2" dump badging "$APK" 2>/dev/null | sed -n 1p)
           ACTUAL_CODE=$(sed -n "s/.*versionCode='\([0-9]*\)'.*/\1/p" <<< "$BADGING")
           ACTUAL_NAME=$(sed -n "s/.*versionName='\([^']*\)'.*/\1/p" <<< "$BADGING")
           if [ "$ACTUAL_CODE" != "$VERSION_CODE" ] || [ "$ACTUAL_NAME" != "$VERSION_NAME" ]; then
@@ -156,8 +160,20 @@ jobs:
           fi
           echo "APK reports versionName $ACTUAL_NAME, versionCode $ACTUAL_CODE."
 
+          # Publishing from a different key is worse than publishing nothing: Android refuses
+          # an update signed by another certificate, so every existing user would have to
+          # uninstall and lose their documents. The digest is the one published in SIGNING.md
+          # and the one every release so far carries, so pin it and stop if it has moved.
+          EXPECTED_FINGERPRINT="b98924a5ba364b67ac61837550e3d2845e3b1c05ac95a42bdeb95230638066fd"
+
           FINGERPRINT=$("$APKSIGNER" verify --print-certs "$APK" \
             | grep -m1 'SHA-256 digest' | awk '{print $NF}')
+          FINGERPRINT_NORMALISED=$(tr -d ':' <<< "$FINGERPRINT" | tr '[:upper:]' '[:lower:]')
+          if [ "$FINGERPRINT_NORMALISED" != "$EXPECTED_FINGERPRINT" ]; then
+            echo "::error::APK is signed with certificate $FINGERPRINT, expected $EXPECTED_FINGERPRINT. Existing installs could not upgrade; refusing to publish."
+            exit 1
+          fi
+
           SHA256=$(sha256sum "$APK" | awk '{print $1}')
           SIZE=$(stat -c %s "$APK")
 
@@ -169,12 +185,25 @@ jobs:
       - name: Write release notes
         run: |
           set -euo pipefail
-          cat > "$RUNNER_TEMP/notes.md" <<EOF
-          KScanner ${VERSION_NAME} — signed release build.
+          NOTES="$RUNNER_TEMP/notes.md"
+          printf 'KScanner %s — signed release build.\n' "$VERSION_NAME" > "$NOTES"
 
+          # What changed in a release belongs in the tree it is tagged from, not in a shell
+          # heredoc that can only be reviewed by reading CI. A tag whose file is absent still
+          # gets the generated install and verification sections, so old tags keep working.
+          NOTES_SRC="docs/releases/${RELEASE_TAG}.md"
+          if [ -f "$NOTES_SRC" ]; then
+            printf '\n' >> "$NOTES"
+            cat "$NOTES_SRC" >> "$NOTES"
+            printf '\n' >> "$NOTES"
+          else
+            echo "No $NOTES_SRC in this tag; publishing the generated notes only."
+          fi
+
+          cat >> "$NOTES" <<EOF
           ### Install
 
-          1. Download \`app-release.apk\` below onto your Android device (Android 8.0 / API 26 or newer).
+          1. Download \`kscanner-$VERSION_NAME.apk\` below onto your Android device (Android 8.0 / API 26 or newer).
           2. Open it and allow installing from this source when prompted.
           3. If you already have KScanner installed from a *different* key, uninstall it first —
              Android refuses updates signed by another certificate.
@@ -182,20 +211,20 @@ jobs:
           ### Verify the download
 
           \`\`\`
-          sha256sum app-release.apk
+          sha256sum kscanner-$VERSION_NAME.apk
           # $SHA256
           \`\`\`
 
           Signed with APK Signature Scheme v2 and v3. To check the certificate:
 
           \`\`\`
-          apksigner verify --print-certs app-release.apk
+          apksigner verify --print-certs kscanner-$VERSION_NAME.apk
           # Signer #1 certificate SHA-256 digest: $FINGERPRINT
           \`\`\`
 
           APK size: $APK_BYTES bytes. versionName $VERSION_NAME, versionCode $VERSION_CODE.
           EOF
-          echo "NOTES_FILE=$RUNNER_TEMP/notes.md" >> "$GITHUB_ENV"
+          echo "NOTES_FILE=$NOTES" >> "$GITHUB_ENV"
 
       - name: Publish release
         env:
@@ -204,9 +233,17 @@ jobs:
           set -euo pipefail
           APK=app/build/outputs/apk/release/app-release.apk
 
+          # GitHub names the downloaded asset after the file it uploaded, so upload a copy
+          # under a name carrying the version. Otherwise every release lands in a downloads
+          # folder as "app-release.apk" and two of them are indistinguishable. The gradle
+          # output keeps its fixed path; only the published name changes.
+          ASSET="$RUNNER_TEMP/kscanner-$VERSION_NAME.apk"
+          cp "$APK" "$ASSET"
+          test -s "$ASSET"
+
           if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
             echo "Release $RELEASE_TAG exists; replacing the APK asset."
-            gh release upload "$RELEASE_TAG" "$APK" --clobber
+            gh release upload "$RELEASE_TAG" "$ASSET" --clobber
             gh release edit "$RELEASE_TAG" \
               --title "KScanner $VERSION_NAME" \
               --notes-file "$NOTES_FILE"
@@ -214,20 +251,29 @@ jobs:
             gh release create "$RELEASE_TAG" \
               --title "KScanner $VERSION_NAME" \
               --notes-file "$NOTES_FILE" \
-              "$APK"
+              "$ASSET"
           else
             echo "Tag $RELEASE_TAG does not exist; creating it at $GITHUB_SHA."
             gh release create "$RELEASE_TAG" \
               --title "KScanner $VERSION_NAME" \
               --notes-file "$NOTES_FILE" \
               --target "$GITHUB_SHA" \
-              "$APK"
+              "$ASSET"
           fi
+
+          # Prove the asset really is on the release rather than trusting a zero exit.
+          UPLOADED=$(gh release view "$RELEASE_TAG" --json assets \
+            --jq '.assets[].name' | grep -Fx "kscanner-$VERSION_NAME.apk" || true)
+          if [ -z "$UPLOADED" ]; then
+            echo "::error::kscanner-$VERSION_NAME.apk is not among the assets of $RELEASE_TAG"
+            exit 1
+          fi
+          echo "Published $UPLOADED on $RELEASE_TAG."
 
       - name: Upload APK as a workflow artifact
         uses: actions/upload-artifact@v5
         with:
-          name: kscanner-release-apk-signed
+          name: kscanner-release-apk-signed-${{ env.VERSION_NAME }}
           path: app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
 

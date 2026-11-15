@@ -153,11 +153,20 @@ object BitmapBridge {
         }
     }
 
-    /** Copies an input stream to a file; used for gallery imports. */
+    /**
+     * Copies an input stream to a file; used for gallery imports and for freezing a page's
+     * pixels into a new original.
+     *
+     * This function takes ownership of [input] and closes it: every caller hands over a
+     * freshly opened stream, and a batch of pages opens one per page, so a stream left open
+     * here leaks a descriptor per page until the process dies.
+     */
     fun copyToFile(input: InputStream, destination: File): Boolean {
         destination.parentFile?.mkdirs()
         return try {
-            destination.outputStream().use { output -> input.copyTo(output) }
+            destination.outputStream().use { output ->
+                input.use { source -> source.copyTo(output) }
+            }
             true
         } catch (e: Exception) {
             false

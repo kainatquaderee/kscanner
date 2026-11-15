@@ -22,6 +22,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -30,6 +31,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
+import com.kscanner.core.io.imageStateKey
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -40,10 +42,17 @@ import java.util.Locale
 /**
  * Decodes an image file off the main thread and exposes it as an [ImageBitmap].
  * Thumbnails never block composition, which keeps the library grid smooth.
+ *
+ * The decode is keyed on the bytes behind [path], not the path alone: a rotation or filter
+ * change rewrites the same file, and keying on the name showed the old page forever.
+ * [revision] is the caller's own "these bytes are new" signal — `Page.renderRevision` for a
+ * page, `Document.updatedAt` for a cover — which also covers a same-length rewrite inside
+ * one filesystem timestamp tick, where the file itself looks untouched.
  */
 @Composable
-fun rememberFileImage(path: String?, maxEdge: Int = 1200): ImageBitmap? {
-    val state = produceState<ImageBitmap?>(initialValue = null, path, maxEdge) {
+fun rememberFileImage(path: String?, maxEdge: Int = 1200, revision: Any? = null): ImageBitmap? {
+    val key = remember(path, revision) { imageStateKey(path) }
+    val state = produceState<ImageBitmap?>(initialValue = null, key, maxEdge, revision) {
         value = if (path.isNullOrBlank()) {
             null
         } else {
@@ -84,8 +93,9 @@ fun Thumbnail(
     modifier: Modifier = Modifier,
     maxEdge: Int = 600,
     contentScale: ContentScale = ContentScale.Crop,
+    revision: Any? = null,
 ) {
-    val image = rememberFileImage(path, maxEdge)
+    val image = rememberFileImage(path, maxEdge, revision)
     Box(
         modifier = modifier
             .clip(RoundedCornerShape(12.dp))

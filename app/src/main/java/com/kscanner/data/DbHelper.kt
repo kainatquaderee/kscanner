@@ -42,6 +42,7 @@ class DbHelper(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION
                 width INTEGER NOT NULL DEFAULT 0,
                 height INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL,
+                flip_decided INTEGER,
                 FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
             )
             """.trimIndent(),
@@ -52,12 +53,15 @@ class DbHelper(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        // v1 is the initial schema. Additive migrations land here.
+        // Additive migrations only. Nullable, so there is no backfill: a page written before
+        // the column existed reads back as "the pass never ran", which the review does not
+        // accuse of being undecided.
+        if (oldVersion < 2) db.execSQL("ALTER TABLE pages ADD COLUMN flip_decided INTEGER")
     }
 
     companion object {
         const val NAME = "kscanner.db"
-        const val VERSION = 1
+        const val VERSION = 2
     }
 }
 
@@ -76,3 +80,9 @@ internal fun Cursor.number(column: String): Long {
 }
 
 internal fun Cursor.int(column: String): Int = number(column).toInt()
+
+/** The column's integer, or null when the stored value is NULL (distinct from 0). */
+internal fun Cursor.intOrNull(column: String): Int? {
+    val index = getColumnIndexOrThrow(column)
+    return if (isNull(index)) null else getInt(index)
+}

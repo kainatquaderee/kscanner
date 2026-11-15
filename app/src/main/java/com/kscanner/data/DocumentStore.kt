@@ -126,6 +126,7 @@ class DocumentStore(context: Context) {
         corners: String?,
         width: Int,
         height: Int,
+        flipDecided: Boolean? = null,
         now: Long = System.currentTimeMillis(),
     ): Long {
         val values = ContentValues().apply {
@@ -139,6 +140,8 @@ class DocumentStore(context: Context) {
             put("width", width)
             put("height", height)
             put("created_at", now)
+            // NULL means no orientation plan ran, which is not the same as "could not tell".
+            put("flip_decided", flipDecided?.let { if (it) 1 else 0 })
         }
         return db().insert("pages", null, values)
     }
@@ -174,6 +177,20 @@ class DocumentStore(context: Context) {
             put("corners", corners)
             put("width", width)
             put("height", height)
+        }
+        db().update("pages", values, "id = ?", arrayOf(pageId.toString()))
+    }
+
+    /**
+     * Re-points a page at an original that carries no rotation, after its pixels were frozen
+     * into a new file. [rotation] and [corners] describe that frozen file, so they are reset
+     * with it.
+     */
+    fun setPageOriginal(pageId: Long, originalPath: String, rotation: Int, corners: String?) {
+        val values = ContentValues().apply {
+            put("original_path", originalPath)
+            put("rotation", rotation)
+            put("corners", corners)
         }
         db().update("pages", values, "id = ?", arrayOf(pageId.toString()))
     }
@@ -242,6 +259,7 @@ class DocumentStore(context: Context) {
         width = int("width"),
         height = int("height"),
         createdAt = number("created_at"),
+        flipDecided = intOrNull("flip_decided")?.let { it != 0 },
     )
 
     private fun DocumentSort.clause(): String = when (this) {
@@ -263,7 +281,7 @@ class DocumentStore(context: Context) {
 
         const val PAGE_SELECT = """
             SELECT id, document_id, page_index, original_path, processed_path, filter_id,
-                   rotation, corners, ocr_text, ocr_lines, width, height, created_at
+                   rotation, corners, ocr_text, ocr_lines, width, height, created_at, flip_decided
             FROM pages
         """
     }

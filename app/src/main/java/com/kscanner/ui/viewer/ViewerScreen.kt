@@ -22,7 +22,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.RotateRight
 import androidx.compose.material.icons.outlined.Share
@@ -102,7 +102,7 @@ fun ViewerScreen(
                     )
                 },
                 navigationIcon = {
-                    IconButton(onClick = onBack) { Icon(Icons.Filled.ArrowBack, "Back", tint = Color.White) }
+                    IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White) }
                 },
                 actions = {
                     IconButton(
@@ -166,7 +166,7 @@ fun ViewerScreen(
             } else {
                 HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { index ->
                     val page = pages[index]
-                    ZoomablePage(path = page.processedPath)
+                    ZoomablePage(path = page.processedPath, revision = page.renderRevision)
                 }
             }
 
@@ -234,8 +234,8 @@ fun ViewerScreen(
  * natural size, which keeps pages from drifting off-screen.
  */
 @Composable
-private fun ZoomablePage(path: String) {
-    val image = rememberFileImage(path, 1800)
+private fun ZoomablePage(path: String, revision: Any?) {
+    val image = rememberFileImage(path, 1800, revision)
     var scale by remember { mutableFloatStateOf(1f) }
     var offsetX by remember { mutableFloatStateOf(0f) }
     var offsetY by remember { mutableFloatStateOf(0f) }

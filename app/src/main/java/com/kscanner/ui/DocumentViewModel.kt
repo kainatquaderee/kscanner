@@ -93,7 +93,7 @@ class DocumentViewModel(
         viewModelScope.launch {
             busy = true
             busyLabel = "Rotating…"
-            val ok = repository.rotatePage(page.id, clockwise)
+            val ok = repository.rotateBy(page.id, if (clockwise) 90 else 270)
             busy = false
             if (!ok) error = "That page could not be rotated."
             refresh()

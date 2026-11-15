@@ -74,25 +74,42 @@ class ScanRepository(
         val quad: Quad?,
         val rotation: Int,
         val filterId: Int,
+        /**
+         * Whether the automatic pass could decide the page's 0-versus-180 flip; null when no
+         * plan ran. Stored so the review can offer a one-tap flip on the pages it could not
+         * decide, and stay quiet on the ones it could.
+         */
+        val flipDecided: Boolean? = null,
     )
+
+    /** Where a batch of rendered pages landed: the document, and each page's row id in order. */
+    class AppendResult(val documentId: Long, val pageIds: List<Long>)
+
+    /**
+     * What an import actually achieved. [documentId] is the document the pages went into, or
+     * null when not one of [uris] could be read — the two cases the caller has to tell apart.
+     */
+    class ImportResult(val documentId: Long?, val imported: Int, val failed: Int)
 
     /**
      * Writes already-rendered pages to a document, creating the document first when
      * [documentId] is null.
      *
-     * @return the document id the pages were added to
+     * @return the document the pages were added to, with the row id of every page in the
+     *   order they were given — the ids are what make a strip tile able to open its page
      */
     suspend fun appendPages(
         documentId: Long?,
         pages: List<RenderedPage>,
         documentName: String? = null,
-    ): Long = withContext(Dispatchers.Default) {
+    ): AppendResult = withContext(Dispatchers.Default) {
         require(pages.isNotEmpty()) { "nothing to write" }
 
         val id = documentId ?: withContext(Dispatchers.IO) {
             store.insertDocument(documentName ?: defaultDocumentName(), null)
         }
 
+        val pageIds = ArrayList<Long>(pages.size)
         var index = withContext(Dispatchers.IO) { store.countPages(id) }
         for (page in pages) {
             val pageFile = withContext(Dispatchers.IO) { storage.newPageFile(id, "page") }
@@ -110,19 +127,22 @@ class ScanRepository(
                 }
             }
 
-            withContext(Dispatchers.IO) {
-                store.insertPage(
-                    documentId = id,
-                    index = index,
-                    originalPath = (originalFile ?: pageFile).absolutePath,
-                    processedPath = pageFile.absolutePath,
-                    filterId = page.filterId,
-                    rotation = page.rotation,
-                    corners = page.quad?.let { Corners.serialize(it) },
-                    width = page.image.width,
-                    height = page.image.height,
-                )
-            }
+            pageIds.add(
+                withContext(Dispatchers.IO) {
+                    store.insertPage(
+                        documentId = id,
+                        index = index,
+                        originalPath = (originalFile ?: pageFile).absolutePath,
+                        processedPath = pageFile.absolutePath,
+                        filterId = page.filterId,
+                        rotation = page.rotation,
+                        corners = page.quad?.let { Corners.serialize(it) },
+                        width = page.image.width,
+                        height = page.image.height,
+                        flipDecided = page.flipDecided,
+                    )
+                },
+            )
 
             if (settings.current.autoOcr) {
                 runCatching { runOcrForPage(id, index) }
@@ -131,7 +151,7 @@ class ScanRepository(
         }
 
         withContext(Dispatchers.IO) { refreshThumbnail(id) }
-        id
+        AppendResult(id, pageIds)
     }
 
     /**
@@ -163,14 +183,23 @@ class ScanRepository(
                 ),
             ),
             documentName = documentName,
-        )
+        ).documentId
     }
 
-    /** Imports gallery images, each becoming its own page with automatic edge detection. */
-    suspend fun importImages(uris: List<Uri>, documentId: Long? = null): Long? = withContext(Dispatchers.IO) {
-        if (uris.isEmpty()) return@withContext documentId
+    /**
+     * Imports gallery images, each becoming its own page with automatic edge detection.
+     *
+     * A picker hands over up to 40 images and any of them may be unreadable, so the counts
+     * travel back with the id: collapsing that to `null` was how a lost page went unmentioned.
+     *
+     * @return the document the pages landed in (null when none did), plus how many images
+     *   were imported and how many could not be read
+     */
+    suspend fun importImages(uris: List<Uri>, documentId: Long? = null): ImportResult = withContext(Dispatchers.IO) {
+        if (uris.isEmpty()) return@withContext ImportResult(documentId, 0, 0)
 
         var target = documentId
+        var imported = 0
         var failures = 0
         for (uri in uris) {
             val bitmap = decodeBounded(uri)
@@ -202,11 +231,16 @@ class ScanRepository(
                 filter = filter,
                 maxOutputEdge = settings.current.maxImageEdge,
             )
-            target = runCatching { saveCapture(target, capture.absolutePath, scanSettings) }
-                .getOrElse { failures++; target }
+            val saved = runCatching { saveCapture(target, capture.absolutePath, scanSettings) }.getOrNull()
+            if (saved != null) {
+                target = saved
+                imported++
+            } else {
+                failures++
+            }
             capture.delete()
         }
-        if (failures == uris.size) null else target
+        ImportResult(if (imported > 0) target else null, imported, failures)
     }
 
     private fun decodeBounded(uri: Uri): Bitmap? = runCatching {
@@ -222,7 +256,8 @@ class ScanRepository(
         contrast: Float = 0f,
         sharpness: Float = 0f,
     ): Boolean = withContext(Dispatchers.Default) {
-        val page = withContext(Dispatchers.IO) { store.getPage(pageId) } ?: return@withContext false
+        val found = withContext(Dispatchers.IO) { store.getPage(pageId) } ?: return@withContext false
+        val page = ensureReprocessableOriginal(found) ?: return@withContext false
         val source = BitmapBridge.decodeFile(File(page.originalPath), settings.current.maxImageEdge)
             ?: return@withContext false
 
@@ -256,14 +291,20 @@ class ScanRepository(
     }
 
     /**
-     * Rotates a finished page by a quarter turn, keeping its crop aligned.
+     * Rotates a finished page clockwise by [degrees] (a multiple of 90) from its current
+     * state, keeping its crop aligned.
      *
      * The outline is stored in the coordinate space of the *rotated* original, so it has to
      * be rotated with the same mapping the pixels use; reprocessing then re-crops from the
-     * untouched original rather than from an already-compressed render.
+     * untouched original rather than from an already-compressed render. [ensureReprocessableOriginal]
+     * runs first, so the rotation is applied once and never compounds across taps.
      */
-    suspend fun rotatePage(pageId: Long, clockwise: Boolean = true): Boolean = withContext(Dispatchers.Default) {
-        val page = withContext(Dispatchers.IO) { store.getPage(pageId) } ?: return@withContext false
+    suspend fun rotateBy(pageId: Long, degrees: Int): Boolean = withContext(Dispatchers.Default) {
+        val turn = ((degrees % 360) + 360) % 360
+        if (turn % 90 != 0) return@withContext false
+
+        val found = withContext(Dispatchers.IO) { store.getPage(pageId) } ?: return@withContext false
+        val page = ensureReprocessableOriginal(found) ?: return@withContext false
         val original = BitmapBridge.decodeFile(File(page.originalPath), settings.current.maxImageEdge)
             ?: return@withContext false
 
@@ -271,22 +312,8 @@ class ScanRepository(
         val rotated = Transforms.rotate(original, current)
         val existing = Corners.parse(page.corners)
 
-        val nextRotation = if (clockwise) (current + 90) % 360 else (current + 270) % 360
-        val nextQuad = when {
-            existing == null -> null
-            clockwise -> Transforms.rotateQuad90(existing, rotated.width, rotated.height)
-            else -> {
-                // Three clockwise turns are the same as one counter-clockwise turn.
-                val once = Transforms.rotateQuad90(
-                    Transforms.rotateQuad90(
-                        Transforms.rotateQuad90(existing, rotated.width, rotated.height),
-                        rotated.height, rotated.width,
-                    ),
-                    rotated.width, rotated.height,
-                )
-                once
-            }
-        }
+        val nextRotation = (current + turn) % 360
+        val nextQuad = rotateQuadBy(existing, turn / 90, rotated.width, rotated.height)
 
         val scan = ScanProcessor.Settings(
             quad = nextQuad,
@@ -312,6 +339,67 @@ class ScanRepository(
             refreshThumbnail(page.documentId)
         }
         true
+    }
+
+    /** Kept for existing callers: one quarter turn in either direction. */
+    suspend fun rotatePage(pageId: Long, clockwise: Boolean = true): Boolean =
+        rotateBy(pageId, if (clockwise) 90 else 270)
+
+    /** One-tap 180 for a page the automatic pass could not decide. */
+    suspend fun flipPage(pageId: Long): Boolean = rotateBy(pageId, 180)
+
+    /**
+     * Guarantees [page]'s original holds pixels with no rotation baked in.
+     *
+     * A page whose original *is* its processed file — a book half, an ID-card sheet, or any
+     * page written with `keepOriginals` off — would otherwise have its stored rotation applied
+     * to pixels that already carry it, so the page turns twice per tap and never comes back.
+     * Such a page first gets its current pixels frozen into a new original, once; every later
+     * rotation or filter change is then relative to those frozen pixels, which is also what
+     * makes four quarter turns return the page to where it started.
+     *
+     * @return the page to work from, or null when the frozen original could not be written
+     */
+    private suspend fun ensureReprocessableOriginal(page: Page): Page? {
+        if (page.originalPath != page.processedPath) return page
+
+        val frozen = withContext(Dispatchers.IO) { storage.newPageFile(page.documentId, "original") }
+        val copied = withContext(Dispatchers.IO) {
+            runCatching {
+                val source = File(page.processedPath)
+                if (source.exists()) {
+                    BitmapBridge.copyToFile(source.inputStream(), frozen)
+                } else {
+                    false
+                }
+            }.getOrDefault(false)
+        }
+        if (!copied) return null
+
+        withContext(Dispatchers.IO) {
+            store.setPageOriginal(
+                pageId = page.id,
+                originalPath = frozen.absolutePath,
+                rotation = 0,
+                corners = null,
+            )
+        }
+        return page.copy(originalPath = frozen.absolutePath, rotation = 0, corners = null)
+    }
+
+    /** [quad] rotated [times] quarter turns clockwise, tracking the frame it lives in. */
+    private fun rotateQuadBy(quad: Quad?, times: Int, width: Int, height: Int): Quad? {
+        if (quad == null) return null
+        var current: Quad = quad
+        var frameWidth = width
+        var frameHeight = height
+        repeat(((times % 4) + 4) % 4) {
+            current = Transforms.rotateQuad90(current, frameWidth, frameHeight)
+            val swap = frameWidth
+            frameWidth = frameHeight
+            frameHeight = swap
+        }
+        return current
     }
 
     suspend fun deletePage(pageId: Long): Long? = withContext(Dispatchers.IO) {

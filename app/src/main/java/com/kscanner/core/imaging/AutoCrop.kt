@@ -43,6 +43,12 @@ object AutoCrop {
          * way; this only tells a caller whether a one-tap flip is worth offering.
          */
         val flipDecided: Boolean,
+        /**
+         * Why [flipDecided] came out the way it did, for a caller that wants to say more than
+         * "I could not tell". [Orientation.FlipReason.ONE_SIDE_ABSTAINED] when the orientation
+         * cue never ran.
+         */
+        val flipReason: Orientation.FlipReason,
         /** Outline in pixels of the *rotated* full-resolution image, or null. */
         val quad: Quad?,
         /**
@@ -112,6 +118,7 @@ object AutoCrop {
         return Plan(
             rotationDegrees = rotation,
             flipDecided = orientation.flipDecided,
+            flipReason = orientation.flipReason,
             quad = outline?.first?.scaled(
                 rotatedImageWidth.toDouble() / rotatedPreviewWidth,
                 rotatedImageHeight.toDouble() / rotatedPreviewHeight,

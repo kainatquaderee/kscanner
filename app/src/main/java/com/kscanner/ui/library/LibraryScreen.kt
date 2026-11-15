@@ -51,6 +51,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -72,6 +74,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.kscanner.data.Document
 import com.kscanner.data.DocumentSort
+import com.kscanner.data.ScanRepository
 import com.kscanner.ui.LibraryViewModel
 import com.kscanner.ui.components.EmptyState
 import com.kscanner.ui.components.Thumbnail
@@ -92,14 +95,14 @@ fun LibraryScreen(
     val loading by viewModel.loading.collectAsStateWithLifecycle()
 
     var searchOpen by remember { mutableStateOf(false) }
-    var query by remember { mutableStateOf("") }
-    var sort by remember { mutableStateOf(DocumentSort.DATE_DESC) }
     var sortOpen by remember { mutableStateOf(false) }
     var selection by remember { mutableStateOf<Set<Long>>(emptySet()) }
+    var confirmDelete by remember { mutableStateOf(0) }
     var renameTarget by remember { mutableStateOf<Document?>(null) }
     var renameText by remember { mutableStateOf("") }
     var importing by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
 
     val picker = rememberLauncherForActivityResult(
         ActivityResultContracts.PickMultipleVisualMedia(maxItems = 40),
@@ -107,15 +110,19 @@ fun LibraryScreen(
         if (uris.isEmpty()) return@rememberLauncherForActivityResult
         importing = true
         scope.launch {
-            val id = viewModel.repositoryImport(uris)
+            val result = viewModel.repositoryImport(uris)
             importing = false
-            if (id != null) onOpenDocument(id)
+            // A page that could not be read is said out loud before the document opens: an
+            // import that quietly loses one of five is the defect, not a cosmetic detail.
+            if (result.failed > 0) snackbarHostState.showSnackbar(importMessage(result, uris.size))
+            result.documentId?.let(onOpenDocument)
         }
     }
 
     LaunchedEffect(Unit) { viewModel.reload() }
 
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             if (selection.isEmpty()) {
                 TopAppBar(
@@ -125,7 +132,12 @@ fun LibraryScreen(
                         }
                     },
                     actions = {
-                        IconButton(onClick = { searchOpen = !searchOpen; if (!searchOpen) { query = ""; viewModel.setQuery("") } }) {
+                        IconButton(
+                            onClick = {
+                                searchOpen = !searchOpen
+                                if (!searchOpen) viewModel.updateQuery("")
+                            },
+                        ) {
                             Icon(Icons.Outlined.Search, contentDescription = "Search")
                         }
                         Box {
@@ -137,11 +149,12 @@ fun LibraryScreen(
                                     DropdownMenuItem(
                                         text = { Text(option.label) },
                                         leadingIcon = {
-                                            if (option == sort) Icon(Icons.Outlined.Check, null, Modifier.size(18.dp))
+                                            if (option == viewModel.sort) {
+                                                Icon(Icons.Outlined.Check, null, Modifier.size(18.dp))
+                                            }
                                         },
                                         onClick = {
-                                            sort = option
-                                            viewModel.setSort(option)
+                                            viewModel.updateSort(option)
                                             sortOpen = false
                                         },
                                     )
@@ -160,10 +173,7 @@ fun LibraryScreen(
                 SelectionBar(
                     count = selection.size,
                     onClose = { selection = emptySet() },
-                    onDelete = {
-                        viewModel.delete(selection)
-                        selection = emptySet()
-                    },
+                    onDelete = { confirmDelete = selection.size },
                     onRename = {
                         val doc = documents.firstOrNull { it.id in selection }
                         if (doc != null) {
@@ -204,13 +214,13 @@ fun LibraryScreen(
             Column(Modifier.fillMaxSize()) {
                 if (searchOpen) {
                     OutlinedTextField(
-                        value = query,
-                        onValueChange = { query = it; viewModel.setQuery(it) },
+                        value = viewModel.query,
+                        onValueChange = viewModel::updateQuery,
                         placeholder = { Text("Search names and recognised text") },
                         leadingIcon = { Icon(Icons.Outlined.Search, null) },
                         trailingIcon = {
-                            if (query.isNotEmpty()) {
-                                IconButton(onClick = { query = ""; viewModel.setQuery("") }) {
+                            if (viewModel.query.isNotEmpty()) {
+                                IconButton(onClick = { viewModel.updateQuery("") }) {
                                     Icon(Icons.Outlined.Close, null)
                                 }
                             }
@@ -231,13 +241,13 @@ fun LibraryScreen(
                     ) {
                         FilterChip(
                             selected = viewModel.folder == null,
-                            onClick = { viewModel.setFolder(null) },
+                            onClick = { viewModel.updateFolder(null) },
                             label = { Text("All") },
                         )
                         folders.take(3).forEach { folder ->
                             FilterChip(
                                 selected = viewModel.folder == folder,
-                                onClick = { viewModel.setFolder(folder) },
+                                onClick = { viewModel.updateFolder(folder) },
                                 label = { Text(folder, maxLines = 1) },
                                 leadingIcon = { Icon(Icons.Outlined.Folder, null, Modifier.size(16.dp)) },
                             )
@@ -252,13 +262,13 @@ fun LibraryScreen(
 
                     documents.isEmpty() -> EmptyState(
                         icon = Icons.Outlined.Description,
-                        title = if (query.isBlank()) "No scans yet" else "Nothing matched",
-                        message = if (query.isBlank()) {
+                        title = if (viewModel.query.isBlank()) "No scans yet" else "Nothing matched",
+                        message = if (viewModel.query.isBlank()) {
                             "Scan a document with the camera, or import pages from your gallery."
                         } else {
                             "Try a different name or search term."
                         },
-                        actionLabel = if (query.isBlank()) "Start scanning" else null,
+                        actionLabel = if (viewModel.query.isBlank()) "Start scanning" else null,
                         onAction = onOpenCamera,
                     )
 
@@ -336,7 +346,43 @@ fun LibraryScreen(
             },
         )
     }
+
+    // Bulk delete used to fire on one tap with no count and no way back.
+    if (confirmDelete > 0) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = 0 },
+            title = {
+                Text(
+                    if (confirmDelete == 1) "Delete this document?" else "Delete $confirmDelete documents?",
+                )
+            },
+            text = { Text("Every page and its original scan will be removed. This cannot be undone.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val ids = selection
+                        confirmDelete = 0
+                        selection = emptySet()
+                        viewModel.delete(ids) { removed ->
+                            scope.launch { snackbarHostState.showSnackbar(deletedMessage(removed)) }
+                        }
+                    },
+                ) { Text("Delete") }
+            },
+            dismissButton = { TextButton(onClick = { confirmDelete = 0 }) { Text("Cancel") } },
+        )
+    }
 }
+
+private fun importMessage(result: ScanRepository.ImportResult, picked: Int): String =
+    if (result.imported == 0) {
+        "Nothing could be imported from those $picked ${if (picked == 1) "image" else "images"}"
+    } else {
+        "Imported ${result.imported} of $picked — ${result.failed} could not be read"
+    }
+
+private fun deletedMessage(count: Int): String =
+    if (count == 1) "1 document deleted" else "$count documents deleted"
 
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
@@ -368,6 +414,9 @@ private fun DocumentCard(
                         .fillMaxWidth()
                         .aspectRatio(0.78f),
                     maxEdge = 480,
+                    // The cover file keeps its name across regenerations; the document row is
+                    // what moves when it is rewritten.
+                    revision = document.updatedAt,
                 )
                 if (document.pageCount > 1) {
                     Surface(

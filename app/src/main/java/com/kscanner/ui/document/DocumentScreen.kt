@@ -24,7 +24,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.outlined.AddPhotoAlternate
 import androidx.compose.material.icons.outlined.ArrowDownward
@@ -106,6 +106,7 @@ fun DocumentScreen(
     var arrangeOpen by remember { mutableStateOf(false) }
     var deleteOpen by remember { mutableStateOf(false) }
     var actionPage by remember { mutableStateOf<Page?>(null) }
+    var deletePageTarget by remember { mutableStateOf<Page?>(null) }
 
     LaunchedEffect(viewModel.error) {
         val message = viewModel.error ?: return@LaunchedEffect
@@ -138,7 +139,7 @@ fun DocumentScreen(
                     }
                 },
                 navigationIcon = {
-                    IconButton(onClick = onBack) { Icon(Icons.Filled.ArrowBack, "Back") }
+                    IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
                 },
                 actions = {
                     Box {
@@ -335,6 +336,34 @@ fun DocumentScreen(
         )
     }
 
+    // Deleting a page is a one-way trip: it takes its original scan with it, and the last
+    // page takes the whole document with it, so both are said before anything happens.
+    deletePageTarget?.let { page ->
+        val lastPage = pages.size == 1
+        AlertDialog(
+            onDismissRequest = { deletePageTarget = null },
+            title = { Text(if (lastPage) "Delete the last page?" else "Delete page ${page.index + 1}?") },
+            text = {
+                Text(
+                    if (lastPage) {
+                        "This is the document's only page, so the document itself is deleted too. This cannot be undone."
+                    } else {
+                        "The page and its original scan will be removed. This cannot be undone."
+                    },
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        deletePageTarget = null
+                        viewModel.deletePage(page) { onDeleted() }
+                    },
+                ) { Text("Delete") }
+            },
+            dismissButton = { TextButton(onClick = { deletePageTarget = null }) { Text("Cancel") } },
+        )
+    }
+
     actionPage?.let { page ->
         ModalBottomSheet(onDismissRequest = { actionPage = null }) {
             Column(Modifier.padding(bottom = 24.dp)) {
@@ -383,7 +412,7 @@ fun DocumentScreen(
                         .fillMaxWidth()
                         .clickable {
                         actionPage = null
-                        viewModel.deletePage(page) { onDeleted() }
+                        deletePageTarget = page
                     },
                 )
             }
@@ -449,6 +478,7 @@ private fun PageCard(
                         .aspectRatio(0.72f),
                     maxEdge = 520,
                     contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                    revision = page.renderRevision,
                 )
                 Surface(
                     modifier = Modifier

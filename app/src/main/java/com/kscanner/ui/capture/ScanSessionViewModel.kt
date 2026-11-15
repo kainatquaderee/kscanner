@@ -18,6 +18,7 @@ import com.kscanner.core.imaging.ScanFilter
 import com.kscanner.core.imaging.ScanProcessor
 import com.kscanner.core.imaging.Spread
 import com.kscanner.core.imaging.Transforms
+import com.kscanner.data.Page
 import com.kscanner.data.ScanMode
 import com.kscanner.data.ScanRepository
 import com.kscanner.data.SettingsStore
@@ -25,6 +26,26 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+
+/**
+ * One tile in the strip under the shutter. The id is what makes a tap able to open it, and
+ * [number] is the page's 1-based position in the run, carried rather than derived from the
+ * tile's index: a book spread commits two pages at once, so counting back from the front of
+ * a newest-first strip would number a spread's halves the wrong way round.
+ */
+data class StripTile(
+    val pageId: Long,
+    val documentId: Long,
+    val bitmap: ImageBitmap,
+    val flipDecided: Boolean?,
+    val number: Int,
+)
+
+/** The full-screen review of what a run has committed, or null when it is closed. */
+data class ReviewState(val pages: List<Page>, val index: Int) {
+    val current: Page? get() = pages.getOrNull(index)
+    val position: String get() = "${index + 1} of ${pages.size}"
+}
 
 /**
  * Drives the continuous capture modes.
@@ -61,9 +82,16 @@ class ScanSessionViewModel(
     var pageCount by mutableStateOf(0)
         private set
 
-    /** Most recent pages, newest first, for the strip under the shutter. */
-    var recent by mutableStateOf<List<ImageBitmap>>(emptyList())
+    /** Most recent pages, newest commit first, for the strip under the shutter. */
+    var recent by mutableStateOf<List<StripTile>>(emptyList())
         private set
+
+    /** The review, or null when it is closed. */
+    var review by mutableStateOf<ReviewState?>(null)
+        private set
+
+    /** Guards the review's rotate/flip against a second tap landing mid-render. */
+    private var reviewBusy = false
 
     /** First side of an ID card waiting for its pair. */
     private var heldSide: RgbaImage? = null
@@ -84,10 +112,28 @@ class ScanSessionViewModel(
         status = if (initial == ScanMode.ID_CARD) "Capture the front of the card" else null
     }
 
+    /**
+     * Sets the session up the first time the camera is shown and does nothing afterwards.
+     *
+     * [beginInto] resets the document, the page count and the strip, so running it again
+     * after a trip away from this screen would wipe the run in progress. Initialising once
+     * is what lets the review be an overlay the user can leave and come back from — the
+     * session survives the whole batch either way.
+     */
+    fun prepareIfNeeded(initial: ScanMode, documentId: Long?) {
+        if (prepared) return
+        prepared = true
+        prepare(initial)
+        beginInto(documentId)
+    }
+
+    private var prepared = false
+
     fun beginInto(documentId: Long?) {
         this.documentId = documentId
         pageCount = 0
         recent = emptyList()
+        review = null
         heldSide = null
         error = null
     }
@@ -156,13 +202,16 @@ class ScanSessionViewModel(
                             quad = plan.quad,
                             rotation = plan.rotationDegrees,
                             filterId = filter.id,
+                            flipDecided = plan.flipDecided,
                         ),
                     ),
                 )
             }
 
             ScanMode.BOOK -> {
-                val halves = withContext(Dispatchers.Default) { renderSpread(source, base, plan.quad) }
+                val halves = withContext(Dispatchers.Default) {
+                    renderSpread(source, base, plan.quad, plan.flipDecided)
+                }
                 commit(halves)
             }
 
@@ -179,7 +228,7 @@ class ScanSessionViewModel(
                     heldSide = null
                     status = "Both sides captured"
                     val sheet = withContext(Dispatchers.Default) { Composite.stacked(first, rendered) }
-                    commit(listOf(sheet.toPage(filter.id)))
+                    commit(listOf(sheet.toPage(filter.id, plan.flipDecided)))
                 }
             }
         }
@@ -193,6 +242,7 @@ class ScanSessionViewModel(
         source: RgbaImage,
         base: ScanProcessor.Settings,
         detected: Quad?,
+        flipDecided: Boolean?,
     ): List<ScanRepository.RenderedPage> {
         val rotated = Transforms.rotate(source, base.rotationDegrees)
         val spread = detected ?: Quad.rect(
@@ -214,38 +264,116 @@ class ScanSessionViewModel(
                 quad = half,
                 rotation = base.rotationDegrees,
                 filterId = base.filter.id,
+                flipDecided = flipDecided,
             )
         }
     }
 
-    private fun RgbaImage.toPage(filterId: Int) = ScanRepository.RenderedPage(
+    private fun RgbaImage.toPage(filterId: Int, flipDecided: Boolean?) = ScanRepository.RenderedPage(
         image = this,
         originalPath = null,
         quad = null,
         rotation = 0,
         filterId = filterId,
+        flipDecided = flipDecided,
     )
 
     private suspend fun commit(pages: List<ScanRepository.RenderedPage>): Int {
-        val id = repository.appendPages(
+        val result = repository.appendPages(
             documentId = documentId,
             pages = pages,
             documentName = if (mode == ScanMode.BOOK) "Book scan" else "Scan",
         )
-        documentId = id
+        val firstNumber = pageCount + 1
+        documentId = result.documentId
         pageCount += pages.size
 
-        val thumbs = withContext(Dispatchers.Default) {
-            pages.map { page ->
+        // The strip is newest commit first, and within a commit stays in reading order: the
+        // halves of one spread are [left, right], and reversing them would swap the two. The
+        // page number travels with the tile because a commit can be two pages wide, so the
+        // tile's index in the strip is not the page's number.
+        val tiles = withContext(Dispatchers.Default) {
+            pages.mapIndexedNotNull { index, page ->
+                val id = result.pageIds.getOrNull(index) ?: return@mapIndexedNotNull null
                 val small = Transforms.fitLongestEdge(page.image, 220)
-                BitmapBridge.toBitmap(small).asImageBitmap()
+                StripTile(
+                    pageId = id,
+                    documentId = result.documentId,
+                    bitmap = BitmapBridge.toBitmap(small).asImageBitmap(),
+                    flipDecided = page.flipDecided,
+                    number = firstNumber + index,
+                )
             }
         }
-        recent = (thumbs.reversed() + recent).take(12)
+        recent = (tiles + recent).take(STRIP_CAP)
         return pages.size
+    }
+
+    // ---------------------------------------------------------------- review
+
+    /** Opens the review on [pageId], or does nothing when that page is not in this run. */
+    fun openReview(pageId: Long) {
+        val id = documentId ?: return
+        viewModelScope.launch {
+            // The rows the document screen reads, so the review shows what was committed —
+            // not the strip's handful of in-memory thumbnails, which cannot reach the far
+            // end of a long run.
+            val rows = withContext(Dispatchers.IO) { repository.pages(id) }
+            val index = rows.indexOfFirst { it.id == pageId }
+            if (index >= 0) review = ReviewState(rows, index)
+        }
+    }
+
+    fun closeReview() {
+        review = null
+    }
+
+    fun stepReview(delta: Int) {
+        val state = review ?: return
+        if (state.pages.isEmpty()) return
+        review = state.copy(index = (state.index + delta).coerceIn(0, state.pages.lastIndex))
+    }
+
+    fun rotateReviewPage(clockwise: Boolean) = actOnReviewPage("That page could not be rotated.") {
+        repository.rotateBy(it, if (clockwise) 90 else 270)
+    }
+
+    /** One-tap 180 for a page the automatic pass said it could not orient. */
+    fun flipReviewPage() = actOnReviewPage("That page could not be turned over.") {
+        repository.flipPage(it)
+    }
+
+    private fun actOnReviewPage(failure: String, action: suspend (Long) -> Boolean) {
+        val state = review ?: return
+        val page = state.current ?: return
+        if (reviewBusy) return
+        reviewBusy = true
+        error = null
+        viewModelScope.launch {
+            val ok = withContext(Dispatchers.IO) { action(page.id) }
+            reviewBusy = false
+            if (!ok) {
+                // A rotate that fails in silence is the defect this screen exists to fix.
+                error = failure
+            } else {
+                replaceReviewPage(page.id)
+            }
+        }
+    }
+
+    /** Re-reads one page's row, so the review repaints from the file just rewritten. */
+    private suspend fun replaceReviewPage(pageId: Long) {
+        val state = review ?: return
+        val fresh = withContext(Dispatchers.IO) { repository.getPage(pageId) } ?: return
+        review = state.copy(pages = state.pages.map { if (it.id == pageId) fresh else it })
     }
 
     fun clearError() {
         error = null
+    }
+
+    private companion object {
+        /** Strip tiles kept under the shutter. The review is not limited by this. */
+        const val STRIP_CAP = 12
     }
 }

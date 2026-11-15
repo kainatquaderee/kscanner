@@ -72,8 +72,10 @@ algorithms that ship are the ones covered by the unit tests.
 - Reorder pages, rotate pages, delete pages
 
 Everything is stored in app-private storage. There is no analytics and no account. The only
-permissions the built APK declares are `CAMERA`, `READ_MEDIA_IMAGES`, and
-`READ_EXTERNAL_STORAGE` (capped at API 32 for pre-13 gallery access).
+platform permissions the built APK declares are `CAMERA`, `READ_MEDIA_IMAGES`, and
+`READ_EXTERNAL_STORAGE` (capped at API 32 for pre-13 gallery access); the manifest also carries
+`com.kscanner.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION`, an app-private, signature-level
+permission added by `androidx.core` that no other app can hold.
 
 ML Kit's transitive Play Services dependencies declare `INTERNET` and
 `ACCESS_NETWORK_STATE`; both are explicitly removed in the manifest with
@@ -175,7 +177,8 @@ Canny/Hough edge detection, end-to-end page detection on synthetic documents, th
 layers (skew, orientation, quality, segmentation and the automatic shutter), the spread
 split and the ID-card composite, the filter presets, the OCR text codec's escaping
 round-trips, and PDF structure — including xref byte offsets, declared stream lengths, page
-counts and text-layer placement. One test writes a real multi-page PDF to
+counts and text-layer placement, and the editor's viewport zoom and pan arithmetic in
+`core/imaging/PreviewViewport.kt`. One test writes a real multi-page PDF to
 `app/build/verification/` so it can be checked with external tooling:
 
 ```bash

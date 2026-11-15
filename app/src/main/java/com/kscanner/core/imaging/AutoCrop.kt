@@ -1,5 +1,6 @@
 package com.kscanner.core.imaging
 
+import kotlin.math.abs
 import kotlin.math.max
 
 /**
@@ -12,16 +13,36 @@ import kotlin.math.max
  * outline removes the halo entirely.
  *
  * So: find the outline first (the detector no longer cares which way up the page is), flatten
- * it, read the orientation and the residual text skew from that clean page, then report the
- * rotation to apply to the whole capture with the outline rotated to match.
+ * it, level the flattened page, read the orientation from that levelled copy and the residual
+ * text skew from the upright page, then report the rotation to apply to the whole capture with
+ * the outline rotated to match.
  *
  * Kept framework-free so the exact preparation the app runs is the one the tests run.
  */
 object AutoCrop {
 
+    /**
+     * Below this the page counts as level and is handed to the orientation cue untouched.
+     * [Skew] resolves a few tenths of a degree, so a smaller reading is noise, and skipping
+     * it keeps the rotation out of every ordinary capture.
+     */
+    private const val LEVEL_THRESHOLD_DEGREES = 0.15
+
+    /** Trimmed from every side of the levelled page, covering the rotation's corner wedges. */
+    private const val BORDER_TRIM_FRACTION = 0.02
+
     data class Plan(
         /** Clockwise rotation that makes the capture upright, in quarter turns. */
         val rotationDegrees: Int,
+        /**
+         * True when the 0-versus-180 half of [rotationDegrees] was decided.
+         *
+         * False means the automatic pass found no evidence to choose between the page and
+         * the same page turned over — too few text bands, too little ink, or a symmetric
+         * layout — and left the page as captured. [rotationDegrees] is the answer either
+         * way; this only tells a caller whether a one-tap flip is worth offering.
+         */
+        val flipDecided: Boolean,
         /** Outline in pixels of the *rotated* full-resolution image, or null. */
         val quad: Quad?,
         /**
@@ -59,7 +80,8 @@ object AutoCrop {
             preview.toGray()
         }
 
-        val orientation = if (fixOrientation) Orientation.estimate(page) else Orientation.UPRIGHT
+        // Orientation is read from the levelled page, not the raw one: see [level].
+        val orientation = if (fixOrientation) Orientation.estimate(level(page)) else Orientation.UPRIGHT
         val rotation = orientation.rotationDegrees
 
         // The page, turned upright: what the user will actually look at.
@@ -89,6 +111,7 @@ object AutoCrop {
 
         return Plan(
             rotationDegrees = rotation,
+            flipDecided = orientation.flipDecided,
             quad = outline?.first?.scaled(
                 rotatedImageWidth.toDouble() / rotatedPreviewWidth,
                 rotatedImageHeight.toDouble() / rotatedPreviewHeight,
@@ -99,6 +122,53 @@ object AutoCrop {
             confidence = if (outline != null) max(0.0, detection?.confidence ?: 0.0) else 0.0,
             quality = Quality.analyse(uprightPage, hasDocument = outline != null),
         )
+    }
+
+    /**
+     * Removes the page's residual skew before the orientation is measured.
+     *
+     * The flip cue compares each text band's ink centroid with the band centre, and at the
+     * working scale a band is a handful of pixels tall: one degree of tilt smears a row by
+     * about its own height, so the displacement collapses and can even change sign. Measured
+     * on a four-line page, 0.8 degrees of residual turned an upright page into an
+     * upside-down one. A residual is the normal case, because the outline the page is
+     * flattened with is a fit to the paper edge and only accurate to a few pixels, so the cue
+     * is read from a levelled copy while the reported [Plan.deskewDegrees] stays what it
+     * always was: the correction for the upright page, applied after cropping.
+     *
+     * A page that is already level skips the rotation entirely, which keeps the common case
+     * byte-for-byte what it was.
+     */
+    private fun level(page: GrayImage): GrayImage {
+        val skew = Skew.estimate(page).degrees
+        if (abs(skew) < LEVEL_THRESHOLD_DEGREES) return page
+
+        // The same resampling the deskew itself uses, which clamps to the frame edge: the
+        // wedges a rotation exposes replicate the paper beside them. A black or white fill
+        // would be ink in its own right and could enter a text band.
+        val rotated = Transforms.rotateArbitrary(page, -skew)
+
+        // Cropping the border keeps the replicated wedge and any page-edge residue out of the
+        // profile, where they would otherwise form a band of their own. Two per cent is
+        // enough to cover the wedge a few degrees of rotation exposes on a 720 px page.
+        return cropBorder(rotated, BORDER_TRIM_FRACTION)
+    }
+
+    /** The interior of [gray], with [fraction] of it trimmed from every side. */
+    private fun cropBorder(gray: GrayImage, fraction: Double): GrayImage {
+        val dx = (gray.width * fraction).toInt()
+        val dy = (gray.height * fraction).toInt()
+        val width = gray.width - 2 * dx
+        val height = gray.height - 2 * dy
+        if (width < 8 || height < 8) return gray
+
+        val out = IntArray(width * height)
+        var i = 0
+        for (y in dy until dy + height) {
+            val row = y * gray.width + dx
+            for (x in 0 until width) out[i++] = gray.data[row + x]
+        }
+        return GrayImage(width, height, out)
     }
 
     /** True when every corner lies inside the unit square, with a little slack for the edge. */

@@ -36,8 +36,23 @@ object ScanProcessor {
         return image
     }
 
-    /** Cheap pass for on-screen previews; same math at a reduced resolution. */
-    fun preview(source: RgbaImage, settings: Settings, previewEdge: Int = 900): RgbaImage {
+    /**
+     * A page with its geometry settled: rotation, cropping and deskew done, enhancement still to
+     * come.
+     *
+     * Splitting [preview] at this seam is what lets the editor re-render while a slider is being
+     * dragged: the outline and the skew are the only expensive inputs the look does not depend on,
+     * so they can be computed once per edit of the geometry instead of once per frame. [edge] is
+     * the longest-edge budget the geometry was built for and travels with the picture so [enhance]
+     * shrinks its result to exactly the size [preview] would have produced.
+     */
+    data class PageGeometry(val image: RgbaImage, val edge: Int)
+
+    /**
+     * Rotation, cropping and deskew: the half of [preview] that does not change when the user picks
+     * a filter or moves a slider. [enhance] finishes the job.
+     */
+    fun previewGeometry(source: RgbaImage, settings: Settings, previewEdge: Int = 900): PageGeometry {
         var image = rotateIfNeeded(source, settings.rotationDegrees)
 
         val longest = max(image.width, image.height)
@@ -53,12 +68,17 @@ object ScanProcessor {
         val previewQuad = settings.quad?.scaled(scale, scale)
         image = cropIfNeeded(image, previewQuad, previewEdge)
         image = deskewIfNeeded(image, settings.deskewDegrees)
-        image = Filters.apply(image, settings.filter, settings.strength)
+        return PageGeometry(image, previewEdge)
+    }
+
+    /** The look: the filter, the manual adjustments, then the shrink onto the geometry's budget. */
+    fun enhance(geometry: PageGeometry, settings: Settings): RgbaImage {
+        var image = Filters.apply(geometry.image, settings.filter, settings.strength)
         image = applyManual(image, settings)
 
         val outLongest = max(image.width, image.height)
-        if (outLongest > previewEdge) {
-            val shrink = previewEdge.toDouble() / outLongest
+        if (outLongest > geometry.edge) {
+            val shrink = geometry.edge.toDouble() / outLongest
             image = Transforms.resize(
                 image,
                 max(1, (image.width * shrink).toInt()),
@@ -67,6 +87,10 @@ object ScanProcessor {
         }
         return image
     }
+
+    /** Cheap pass for on-screen previews; same math at a reduced resolution. */
+    fun preview(source: RgbaImage, settings: Settings, previewEdge: Int = 900): RgbaImage =
+        enhance(previewGeometry(source, settings, previewEdge), settings)
 
     private fun applyManual(image: RgbaImage, settings: Settings): RgbaImage {
         return if (settings.brightness != 0f || settings.contrast != 0f || settings.sharpness != 0f) {

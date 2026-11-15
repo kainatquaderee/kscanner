@@ -2,7 +2,6 @@ package com.kscanner.ui.editor
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -61,19 +60,22 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathFillType
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
-import androidx.compose.foundation.Image
 import com.kscanner.core.imaging.CaptureAdvice
 import com.kscanner.core.imaging.DetectMethod
 import com.kscanner.core.imaging.Pt
 import com.kscanner.core.imaging.Quad
 import com.kscanner.core.imaging.ScanFilter
 import com.kscanner.ui.EditorViewModel
+import com.kscanner.ui.components.DragClaim
 import com.kscanner.ui.components.LoadingOverlay
+import com.kscanner.ui.components.ZoomState
+import com.kscanner.ui.components.ZoomableImage
+import com.kscanner.ui.components.zoomable
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -85,6 +87,12 @@ fun EditorScreen(
     onCancel: () -> Unit,
 ) {
     LaunchedEffect(path) { viewModel.load(path) }
+
+    // One zoom per page, reused by both stages. It is reset when the stage changes and when the
+    // picture turns: keying on the size of the drawn bitmap instead would reset the zoom in the
+    // middle of entering the filter stage, because the result lands a frame after the stage does.
+    val zoom = remember(path) { ZoomState() }
+    LaunchedEffect(viewModel.stage, viewModel.rotation) { zoom.reset() }
 
     val snackbarHostState = remember { SnackbarHostState() }
     var adjustSheetOpen by remember { mutableStateOf(false) }
@@ -172,6 +180,7 @@ fun EditorScreen(
                             onMoveCorner = viewModel::moveCorner,
                             autoDetected = viewModel.autoDetected,
                             statusText = cropStatus(viewModel),
+                            zoom = zoom,
                         )
                     } else {
                         EmptyEditor()
@@ -187,11 +196,11 @@ fun EditorScreen(
                                 .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)),
                             contentAlignment = Alignment.Center,
                         ) {
-                            Image(
+                            ZoomableImage(
                                 bitmap = bitmap,
+                                state = zoom,
                                 contentDescription = "Filter preview",
                                 modifier = Modifier.fillMaxSize().padding(12.dp),
-                                contentScale = ContentScale.Fit,
                             )
                         }
                     } else {
@@ -299,6 +308,7 @@ private fun CropStage(
     onMoveCorner: (Int, Double, Double) -> Unit,
     autoDetected: Boolean,
     statusText: String,
+    zoom: ZoomState,
 ) {
     val accent = MaterialTheme.colorScheme.primary
     val error = MaterialTheme.colorScheme.error
@@ -323,28 +333,43 @@ private fun CropStage(
             val latestQuad by rememberUpdatedState(quad)
             val latestMove by rememberUpdatedState(onMoveCorner)
             var activeCorner by remember { mutableStateOf(-1) }
-            val touchRadius = with(androidx.compose.ui.platform.LocalDensity.current) { 44.dp.toPx() }
+            val touchRadius = with(LocalDensity.current) { 44.dp.toPx() }
+
+            // A corner handle has first refusal on a drag. The hit test runs against what the canvas
+            // draws — its own, unscaled coordinates are what the gesture reports — so the fingertip
+            // radius has to shrink by the zoom before it can be compared with a handle's position.
+            val claim = object : DragClaim {
+                override fun onStart(position: Offset): Boolean {
+                    val hit = latestMapping.nearestCorner(latestQuad, position, touchRadius / zoom.scale)
+                    activeCorner = hit
+                    return hit >= 0
+                }
+
+                override fun onDrag(position: Offset) {
+                    val index = activeCorner
+                    if (index < 0) return
+                    val normalised = latestMapping.toNormalised(position)
+                    latestMove(index, normalised.x.toDouble(), normalised.y.toDouble())
+                }
+
+                override fun onEnd() {
+                    activeCorner = -1
+                }
+            }
 
             Canvas(
                 modifier = Modifier
                     .fillMaxSize()
-                    .pointerInput(Unit) {
-                        detectDragGestures(
-                            onDragStart = { position ->
-                                activeCorner = latestMapping.nearestCorner(latestQuad, position, touchRadius)
-                            },
-                            onDragEnd = { activeCorner = -1 },
-                            onDragCancel = { activeCorner = -1 },
-                            onDrag = { change, _ ->
-                                val index = activeCorner
-                                if (index >= 0) {
-                                    val normalised = latestMapping.toNormalised(change.position)
-                                    latestMove(index, normalised.x.toDouble(), normalised.y.toDouble())
-                                    change.consume()
-                                }
-                            },
-                        )
-                    },
+                    .graphicsLayer {
+                        scaleX = zoom.scale
+                        scaleY = zoom.scale
+                        translationX = zoom.offsetX
+                        translationY = zoom.offsetY
+                        clip = true
+                    }
+                    // Ordered after the layer: the gesture code maps finger positions back through
+                    // the inverse of the transform above, and it can only do that inside the layer.
+                    .zoomable(zoom, aspect = bitmap.width.toFloat() / bitmap.height, claim = claim),
             ) {
                 drawImage(
                     image = bitmap,
@@ -356,6 +381,11 @@ private fun CropStage(
                 val tr = quad.tr.toCanvas(mapping)
                 val br = quad.br.toCanvas(mapping)
                 val bl = quad.bl.toCanvas(mapping)
+
+                // The handles and the outline are drawn inside the zoomed layer, so they are divided
+                // by it to keep the same apparent thickness at every magnification.
+                val lineWidth = 2.5.dp.toPx() / zoom.scale
+                val handleWidth = 3.dp.toPx() / zoom.scale
 
                 // Dim everything outside the outline without needing a blend mode.
                 val scrim = Path().apply {
@@ -376,16 +406,16 @@ private fun CropStage(
                     lineTo(bl.x, bl.y)
                     close()
                 }
-                drawPath(outline, accent, style = Stroke(width = 2.5.dp.toPx()))
+                drawPath(outline, accent, style = Stroke(width = lineWidth))
 
                 for ((index, point) in listOf(tl, tr, br, bl).withIndex()) {
-                    val radius = if (index == activeCorner) 13.dp.toPx() else 10.dp.toPx()
+                    val radius = (if (index == activeCorner) 13.dp else 10.dp).toPx() / zoom.scale
                     drawCircle(Color.White, radius = radius, center = point)
                     drawCircle(
                         color = if (index == activeCorner) accent else accent.copy(alpha = 0.9f),
                         radius = radius,
                         center = point,
-                        style = Stroke(width = 3.dp.toPx()),
+                        style = Stroke(width = handleWidth),
                     )
                 }
             }

@@ -40,6 +40,21 @@ class EditorViewModel(
     private val settingsStore: SettingsStore,
 ) : ViewModel() {
 
+    private companion object {
+        /**
+         * Longest edge of the picture the crop stage works on. Deliberately larger than the
+         * detector's own working copy: the outline is placed by eye, so magnifying the page has to
+         * reveal pixels rather than the blur of an enlargement.
+         */
+        const val CROP_PREVIEW_EDGE = 2048
+
+        /**
+         * Longest edge of the filter stage's preview. The look is judged at a glance, so this one
+         * trades a little detail for a redraw the adjustment sliders can keep up with.
+         */
+        const val FILTER_PREVIEW_EDGE = 1920
+    }
+
     enum class Stage { CROP, FILTER }
 
     var stage by mutableStateOf(Stage.CROP)
@@ -108,9 +123,18 @@ class EditorViewModel(
         private set
 
     private var original: RgbaImage? = null
-    private var previewImage: RgbaImage? = null
     private var sourcePath: String? = null
     private var previewJob: Job? = null
+
+    /**
+     * The page without its look, kept between filter changes; see [geometryFor].
+     *
+     * Volatile because it is built on a background dispatcher and read from whichever thread
+     * happens to ask next. Without it a reader could see the holder but not the picture inside
+     * it — the cache would be worse than useless.
+     */
+    @Volatile
+    private var geometry: CachedGeometry? = null
 
     val hasImage: Boolean get() = original != null
 
@@ -159,11 +183,12 @@ class EditorViewModel(
                 fixOrientation = settingsStore.current.autoRotate,
             )
             val rotated = Transforms.rotate(source, plan.rotationDegrees)
-            val preview = Transforms.fitLongestEdge(rotated, 1080)
             if (applyStyle && settingsStore.current.autoFilter) {
-                filter = Filters.auto(preview)
+                // The preset is chosen from the frame's statistics alone, so the cheap copy the
+                // planner already works at is enough and the displayed one is not paid for twice.
+                filter = Filters.auto(Transforms.fitLongestEdge(rotated, 1080))
             }
-            Prepared(plan, preview)
+            Prepared(plan, Transforms.fitLongestEdge(rotated, CROP_PREVIEW_EDGE))
         }
 
         rotation = prepared.plan.rotationDegrees
@@ -171,7 +196,6 @@ class EditorViewModel(
         detectionMethod = prepared.plan.method
         detectionConfidence = prepared.plan.confidence
         advice = prepared.plan.quality.advice
-        previewImage = prepared.preview
 
         // Take the outline from the plan as 0..1 fractions of the frame. It is *not* re-derived
         // here: the plan's other outline is in full-resolution pixels, and dividing that by the
@@ -248,14 +272,19 @@ class EditorViewModel(
         viewModelScope.launch {
             loading = true
             val measured = withContext(Dispatchers.Default) { measureSkew() }
-            deskewDegrees = measured
+            if (measured != deskewDegrees) {
+                deskewDegrees = measured
+                invalidateGeometry()
+            }
             if (stage == Stage.FILTER) recomputeResult()
             loading = false
         }
     }
 
     fun clearDeskew() {
+        if (deskewDegrees == 0.0) return
         deskewDegrees = 0.0
+        invalidateGeometry()
         if (stage == Stage.FILTER) recomputeResult()
     }
 
@@ -281,12 +310,14 @@ class EditorViewModel(
 
     fun openFilterStage() {
         stage = Stage.FILTER
+        invalidateGeometry()
         recomputeResult(immediate = true)
     }
 
     fun backToCropStage() {
         stage = Stage.CROP
         previewJob?.cancel()
+        invalidateGeometry()
     }
 
     fun selectFilter(next: ScanFilter) {
@@ -325,17 +356,73 @@ class EditorViewModel(
     private fun recomputeResult(immediate: Boolean = false) {
         val source = original ?: return
         val settings = buildSettings(source)
+        val key = GeometryKey(
+            path = sourcePath.orEmpty(),
+            rotation = rotation,
+            quad = quadNorm,
+            deskewDegrees = deskewDegrees,
+        )
         previewJob?.cancel()
         previewJob = viewModelScope.launch {
             if (!immediate) delay(110)
             val rendered = withContext(Dispatchers.Default) {
-                ScanProcessor.preview(source, settings, previewEdge = 1080)
+                val geometry = geometryFor(source, key, settings)
+                ScanProcessor.enhance(geometry, settings)
             }
             resultBitmap = withContext(Dispatchers.Default) {
                 BitmapBridge.toBitmap(rendered).asImageBitmap()
             }
         }
     }
+
+    /**
+     * The page without its look, rebuilt only when the outline, the rotation or the skew moved.
+     *
+     * The whole point of the filter stage is to compare looks, and it re-renders on every slider
+     * frame. Rotation, warping and deskewing do not depend on any of those sliders, so they are
+     * kept here and only the enhancement is re-run on top.
+     *
+     * The key is stored *with* the picture in one immutable holder rather than next to it, so a
+     * reader can never pair an old outline with a new picture. A key that is stale simply misses and
+     * costs one rebuild; it can never produce the wrong page.
+     */
+    private fun geometryFor(
+        source: RgbaImage,
+        key: GeometryKey,
+        settings: ScanProcessor.Settings,
+    ): ScanProcessor.PageGeometry {
+        val cached = geometry
+        if (cached != null && cached.key == key) return cached.geometry
+        return ScanProcessor.previewGeometry(source, settings, FILTER_PREVIEW_EDGE).also {
+            geometry = CachedGeometry(key, it)
+        }
+    }
+
+    /**
+     * Forgets the cached page.
+     *
+     * Only two things can move the geometry while the filter stage is up — the deskew buttons — and
+     * both call this. Leaving the stage calls it as well, so the buffer is never held while the crop
+     * stage is what the user is looking at. [GeometryKey] would catch a stale entry on its own, so
+     * this is about releasing memory rather than about correctness.
+     */
+    private fun invalidateGeometry() {
+        geometry = null
+    }
+
+    /** Everything in the settings that [ScanProcessor.previewGeometry] reads, by value. */
+    private data class GeometryKey(
+        val path: String,
+        val rotation: Int,
+        val quad: Quad,
+        val deskewDegrees: Double,
+    )
+
+    /** A page geometry together with the geometry it was built from. */
+    private data class CachedGeometry(
+        val key: GeometryKey,
+        val geometry: ScanProcessor.PageGeometry,
+    )
 
     // ------------------------------------------------------------ shared
 
@@ -348,7 +435,7 @@ class EditorViewModel(
         val source = original ?: return
         val rendered = withContext(Dispatchers.Default) {
             val rotated = Transforms.rotate(source, rotation)
-            val preview = Transforms.fitLongestEdge(rotated, 1080)
+            val preview = Transforms.fitLongestEdge(rotated, CROP_PREVIEW_EDGE)
             val detected = if (detect) {
                 DocDetector.detect(preview)?.quad
             } else {
@@ -358,7 +445,6 @@ class EditorViewModel(
             Triple(preview, detected, skew)
         }
         val (preview, found, skew) = rendered
-        previewImage = preview
 
         if (detect) {
             quadNorm = found?.scaled(1.0 / preview.width, 1.0 / preview.height)

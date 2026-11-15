@@ -1,6 +1,7 @@
 package com.kscanner.core.imaging
 
 import kotlin.math.cos
+import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.sin
@@ -36,22 +37,32 @@ object Transforms {
         var i = 0
         for (y in 0 until dstH) {
             val fy = (y + 0.5) * sy - 0.5
-            val y0 = kotlin.math.floor(fy).toInt()
-            val ty = fy - y0
             for (x in 0 until dstW) {
                 val fx = (x + 0.5) * sx - 0.5
-                val x0 = kotlin.math.floor(fx).toInt()
-                val tx = fx - x0
-                val c00 = src.getClamped(x0, y0)
-                val c10 = src.getClamped(x0 + 1, y0)
-                val c01 = src.getClamped(x0, y0 + 1)
-                val c11 = src.getClamped(x0 + 1, y0 + 1)
-                val top = c00 + (c10 - c00) * tx
-                val bottom = c01 + (c11 - c01) * tx
-                out[i++] = (top + (bottom - top) * ty).roundToInt().coerceIn(0, 255)
+                out[i++] = sampleGrayBilinear(src, fx, fy)
             }
         }
         return GrayImage(dstW, dstH, out)
+    }
+
+    /**
+     * Bilinear sample of one channel, clamped at the edges.
+     *
+     * Shared by [resizeGray] and [rotateArbitrary] on purpose: the deskew correction is only
+     * trustworthy if it resamples exactly like the scaling around it does.
+     */
+    private fun sampleGrayBilinear(src: GrayImage, x: Double, y: Double): Int {
+        val x0 = floor(x).toInt()
+        val y0 = floor(y).toInt()
+        val tx = x - x0
+        val ty = y - y0
+        val c00 = src.getClamped(x0, y0)
+        val c10 = src.getClamped(x0 + 1, y0)
+        val c01 = src.getClamped(x0, y0 + 1)
+        val c11 = src.getClamped(x0 + 1, y0 + 1)
+        val top = c00 + (c10 - c00) * tx
+        val bottom = c01 + (c11 - c01) * tx
+        return (top + (bottom - top) * ty).roundToInt().coerceIn(0, 255)
     }
 
     /**
@@ -115,29 +126,71 @@ object Transforms {
      * Positive angles turn the picture clockwise, matching [Skew]'s sign convention.
      */
     fun rotateArbitrary(src: RgbaImage, degrees: Double): RgbaImage {
-        val d = ((degrees % 360.0) + 360.0) % 360.0
-        val shortest = if (d > 180.0) d - 360.0 else d
-        if (shortest > -0.05 && shortest < 0.05) return src.copy()
-
-        val rad = Math.toRadians(shortest)
-        val c = cos(rad)
-        val s = sin(rad)
-        val cx = (src.width - 1) / 2.0
-        val cy = (src.height - 1) / 2.0
-
+        if (negligibleTurn(degrees)) return src.copy()
         val out = IntArray(src.size)
-        var i = 0
-        for (y in 0 until src.height) {
-            val dy = y - cy
-            for (x in 0 until src.width) {
-                val dx = x - cx
-                // Inverse rotation: the pixel that must be sampled for this destination.
-                val px = c * dx + s * dy + cx
-                val py = -s * dx + c * dy + cy
-                out[i++] = src.sampleBilinear(px, py)
-            }
+        forEachRotatedPixel(src.width, src.height, degrees) { index, sourceX, sourceY ->
+            out[index] = src.sampleBilinear(sourceX, sourceY)
         }
         return RgbaImage(src.width, src.height, out)
+    }
+
+    /**
+     * Gray twin of [rotateArbitrary], for the pages the orientation and skew cues read.
+     *
+     * Both overloads walk the same [forEachRotatedPixel] mapping: the deskew correction
+     * measured in gray space and the one applied to colour pixels have to be the same
+     * rotation, and a second copy of the trigonometry is exactly how the two would drift.
+     *
+     * As in the colour version, samples outside the frame clamp to the edge, so the wedges
+     * the rotation exposes replicate the paper beside them instead of turning black.
+     */
+    fun rotateArbitrary(src: GrayImage, degrees: Double): GrayImage {
+        if (negligibleTurn(degrees)) return src.copy()
+        val out = IntArray(src.size)
+        forEachRotatedPixel(src.width, src.height, degrees) { index, sourceX, sourceY ->
+            out[index] = sampleGrayBilinear(src, sourceX, sourceY)
+        }
+        return GrayImage(src.width, src.height, out)
+    }
+
+    /**
+     * The one inverse mapping every arbitrary rotation here uses: for each destination pixel
+     * in raster order it hands the callback the source coordinate to sample.
+     *
+     * Inlined because it is called once per pixel, and deliberately the only place the
+     * inverse rotation is written down.
+     */
+    private inline fun forEachRotatedPixel(
+        width: Int,
+        height: Int,
+        degrees: Double,
+        emit: (index: Int, sourceX: Double, sourceY: Double) -> Unit,
+    ) {
+        val rad = Math.toRadians(shortestTurn(degrees))
+        val c = cos(rad)
+        val s = sin(rad)
+        val cx = (width - 1) / 2.0
+        val cy = (height - 1) / 2.0
+        var index = 0
+        for (y in 0 until height) {
+            val dy = y - cy
+            for (x in 0 until width) {
+                val dx = x - cx
+                emit(index++, c * dx + s * dy + cx, -s * dx + c * dy + cy)
+            }
+        }
+    }
+
+    /** The shortest signed equivalent of [degrees], so a turn is never taken the long way. */
+    private fun shortestTurn(degrees: Double): Double {
+        val d = ((degrees % 360.0) + 360.0) % 360.0
+        return if (d > 180.0) d - 360.0 else d
+    }
+
+    /** True for a turn so small that resampling would only blur the picture. */
+    private fun negligibleTurn(degrees: Double): Boolean {
+        val shortest = shortestTurn(degrees)
+        return shortest > -0.05 && shortest < 0.05
     }
 
     fun flipHorizontal(src: RgbaImage): RgbaImage {

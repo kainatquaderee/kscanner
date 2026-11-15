@@ -33,11 +33,19 @@ algorithms that ship are the ones covered by the unit tests.
 - Cascading fallbacks for hard frames: the brightest large region fitted with a rotated
   rectangle, then the text block itself
 - Automatic orientation (upright / sideways / upside down) decided from the line axis and,
-  conservatively, the ink distribution inside each text band
+  conservatively, the ink distribution inside each text band — read from a *levelled* copy of
+  the page, because a degree or two of residual tilt smears a text band by about its own
+  height and quietly inverts the cue that tells a page from the same page turned over. A page
+  whose bands carry no evidence is left as captured rather than guessed at, and says so
+  through `AutoCrop.Plan.flipDecided`
 - Automatic deskew: the residual lean of the text is measured on the *cropped page* and
   rotated out, so a background table edge cannot vote on it
 - Drag any of the four corners to fine-tune; the outline rotates with the image and refuses
   moves that would fold it
+- Pinch to zoom and drag to pan both editor stages, with a double tap to toggle 2×. The crop
+  preview is rendered at up to 2048 px and the filter preview at 1920 px, so magnifying reveals
+  pixels instead of the blur of an enlargement; the zoom rules are plain arithmetic over screen
+  coordinates in `core/imaging/PreviewViewport.kt`, unit tested without a device
 - Perspective correction via a homography solved from the four corner correspondences
 
 **Enhancement**

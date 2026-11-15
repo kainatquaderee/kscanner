@@ -1,5 +1,9 @@
 package com.kscanner.ui.settings
 
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -31,6 +35,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.kscanner.core.imaging.ScanFilter
@@ -181,6 +186,30 @@ fun SettingsScreen(
                 }
             }
 
+            HorizontalDivider(Modifier.padding(vertical = 12.dp))
+            SectionHeader("Credits")
+
+            // Adding a contributor is a single line here. Nothing counts or caps the list,
+            // so the "all new contributors" sentence below stays true as it grows.
+            listOf(
+                Triple("kainatquaderee", "Project owner on GitHub", "https://github.com/kainatquaderee"),
+            ).forEach { (name, description, url) ->
+                LinkRow(name = name, description = description, url = url)
+            }
+
+            Text(
+                text = "All new contributors will appear here, with thanks.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(bottom = 8.dp),
+            )
+
+            LinkRow(
+                name = "KScanner",
+                description = "Source code on GitHub",
+                url = "https://github.com/kainatquaderee/kscanner",
+            )
+
             Spacer(Modifier.height(24.dp))
             Text(
                 text = "KScanner 1.0 · Scans are processed and stored entirely on this device.",
@@ -209,6 +238,42 @@ private fun SettingLabel(title: String) {
         style = MaterialTheme.typography.bodyMedium,
         modifier = Modifier.padding(bottom = 6.dp),
     )
+}
+
+@Composable
+private fun LinkRow(
+    name: String,
+    description: String,
+    url: String,
+) {
+    val context = LocalContext.current
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            // Row-wide tap target, matching the vertical rhythm of SwitchRow above.
+            .clickable { openUrl(context, url) }
+            .padding(vertical = 8.dp),
+    ) {
+        Text(
+            text = name,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.primary,
+        )
+        Text(
+            text = description,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/**
+ * Hands [url] to whichever app can open it. A device without a browser — or without a
+ * handler for this scheme — has no matching activity, and startActivity would throw
+ * ActivityNotFoundException, so the failure is swallowed instead of crashing the screen.
+ */
+private fun openUrl(context: Context, url: String) {
+    runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
 }
 
 @Composable

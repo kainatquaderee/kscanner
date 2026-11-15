@@ -35,6 +35,16 @@ algorithms that ship are covered by the unit tests rather than by a device.
   the wait). It is deliberately unhurried so it does not fire at a half-settled hand.
 - Live capture advice — "Hold still", "Glare on the page", "Even out the light" — driven by
   the same measurements the pipeline uses, instead of a silent bad scan
+- **Live framing outline**: the viewfinder draws the page border as it is found and dims
+  everything outside it, so the shot can be lined up before the shutter is pressed. It is
+  always on and has no setting, because it is the affordance rather than a mode. The border is
+  *followed* rather than redrawn: corners move for changes larger than 5 dp, moves are tweened
+  rather than snapped, and a page that goes missing keeps its outline for 400 ms before the pen
+  is lifted — an outline that tracked every frame's noise would shimmer, and one that vanished
+  whenever a line was briefly lost would flicker. Detection is asked for about seven times a
+  second on the same small grayscale frame the automatic shutter measures, and the live path
+  uses the line detector alone: the fallbacks exist for still photographs, where an outline
+  round a block of text beats nothing, but live that box would read as the page edge
 - Import existing photos from the gallery; each becomes a page and is auto-detected
 
 **Edge detection and cropping**
@@ -192,6 +202,8 @@ core/imaging    framework-free imaging engine (pixels in, pixels out)
   Composite     lay two captures out on one sheet (the ID-card composite)
   CaptureGate   when the automatic shutter should fire
   Luma          a camera frame's strided luma plane as a GrayImage
+  FrameGeometry where a detected outline lands on the preview's own pixels
+  OutlineTracker which outline the live preview draws, and when it lifts
   Filters       the seven enhancement presets plus blend/adjust/unsharp
   ScanProcessor rotate -> crop -> deskew -> filter in one pass, full and preview variants
   BitmapBridge  the only file that touches android.graphics (decode/encode)
@@ -211,7 +223,7 @@ layer.
 
 ## Tests
 
-177 unit tests in 19 classes, all runnable on a plain JVM:
+204 unit tests in 21 classes, all runnable on a plain JVM:
 
 ```bash
 ./gradlew :app:testDebugUnitTest
@@ -223,7 +235,14 @@ layers (skew, orientation, quality, segmentation and the automatic shutter), the
 split and the ID-card composite, the filter presets, the OCR text codec's escaping
 round-trips, and PDF structure — including xref byte offsets, declared stream lengths, page
 counts and text-layer placement, and the editor's viewport zoom and pan arithmetic in
-`core/imaging/PreviewViewport.kt`. The orientation work is pinned by tests at two levels: the
+`core/imaging/PreviewViewport.kt`. The framing overlay is covered at both levels it can be
+wrong: `core/imaging/FrameGeometry.kt` takes a detected outline to the pixels the preview
+actually drew it in — for each of a camera's four rotations, and through the fill-and-crop the
+preview uses — and `core/imaging/OutlineTracker.kt` is the decision of what to draw now, driven
+against a clock the test owns: the throttle, the confidence gate, the deadband, the tween and
+the hold, all without a camera and without sleeping. The detector is pinned from grayscale too,
+since that is what the preview hands it, and the outline it returns there has to match the one
+the still path returns. The orientation work is pinned by tests at two levels: the
 band extents and the 0-versus-180 decision as plain functions, and a contract that walks
 realistic prose fixtures — uneven light, a shadowed half, rules, underlines, a stamp, a
 signature — asserting that an upside-down page is either turned back upright or reported as
@@ -241,7 +260,8 @@ pdftoppm -png app/build/verification/ocr-sample.pdf page
 
 ## Known issues
 
-True of v1.5.0, stated rather than hidden:
+True of v1.5.0 as released, stated rather than hidden. The last entry is new with the live
+framing outline, which has not shipped yet:
 
 - **Folder grouping and bulk rename are not reachable in the UI.** The `documents` table has a
   `folder` column, `DocumentStore.listFolders` can read it and `ScanRepository.moveDocument`
@@ -261,6 +281,12 @@ True of v1.5.0, stated rather than hidden:
   OCR on the page again stores fresh boxes.
 - **`StorageManager.sweepCaptures` is not wired up.** Scratch captures under
   `cacheDir/captures` are written and never swept; the method exists and has no caller.
+- **The live outline is detected on a subsampled frame.** The preview's luma plane is made small
+  for detection by *skipping* pixels (`Luma.grayFromPlane`'s `step`), not by averaging them, so
+  the detector sees a more aliased image live than it does on the still path, which resamples
+  bilinearly. On a busy background that can cost the live outline the confidence the still path
+  keeps, and it is why the live path declines the detector's fallbacks. Averaging would remove
+  the difference and costs a second pass over the plane on every analysed frame.
 
 ## Licence
 

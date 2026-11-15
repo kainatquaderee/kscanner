@@ -58,29 +58,84 @@ object DocDetector {
         } else {
             image
         }
-        val sx = image.width.toDouble() / small.width
-        val sy = image.height.toDouble() / small.height
-        val gray = small.toGray()
+        return detectIn(
+            gray = small.toGray(),
+            frameWidth = image.width,
+            frameHeight = image.height,
+            sx = image.width.toDouble() / small.width,
+            sy = image.height.toDouble() / small.height,
+            aspectHint = aspectHint,
+            allowFallbacks = allowFallbacks,
+        )
+    }
 
+    /**
+     * Same pipeline straight from a grayscale frame, so the camera preview can detect without
+     * packing its luma plane into RGBA and unpacking it again. A preview frame arrives as one
+     * byte per pixel; converting it to colour and back would cost more than the detection.
+     */
+    fun detect(
+        image: GrayImage,
+        workingEdge: Int = 700,
+        aspectHint: Double? = null,
+        allowFallbacks: Boolean = true,
+    ): Detection? {
+        if (image.width < MIN_SIDE_PX || image.height < MIN_SIDE_PX) return null
+
+        val scale = min(1.0, workingEdge.toDouble() / max(image.width, image.height))
+        val small = if (scale < 1.0) {
+            Transforms.resizeGray(
+                image,
+                max(1, (image.width * scale).roundToInt()),
+                max(1, (image.height * scale).roundToInt()),
+            )
+        } else {
+            image
+        }
+        return detectIn(
+            gray = small,
+            frameWidth = image.width,
+            frameHeight = image.height,
+            sx = image.width.toDouble() / small.width,
+            sy = image.height.toDouble() / small.height,
+            aspectHint = aspectHint,
+            allowFallbacks = allowFallbacks,
+        )
+    }
+
+    /**
+     * The pipeline proper, on an image already at working scale. [sx] and [sy] scale the result
+     * back up to the caller's original resolution.
+     */
+    private fun detectIn(
+        gray: GrayImage,
+        /** Size of the image the caller handed in, which the result is expressed in. */
+        frameWidth: Int,
+        frameHeight: Int,
+        sx: Double,
+        sy: Double,
+        aspectHint: Double?,
+        allowFallbacks: Boolean,
+    ): Detection? {
         val edge = detectByEdges(gray, aspectHint)
         if (edge != null && edge.score >= ACCEPT) {
-            return finish(edge, DetectMethod.EDGES, sx, sy, image)
+            return finish(edge, DetectMethod.EDGES, sx, sy, frameWidth, frameHeight)
         }
 
         if (allowFallbacks) {
             val bright = detectBrightRegion(gray, aspectHint)
             if (bright != null && (edge == null || bright.score > edge.score)) {
-                return finish(bright, DetectMethod.BRIGHT_REGION, sx, sy, image)
+                return finish(bright, DetectMethod.BRIGHT_REGION, sx, sy, frameWidth, frameHeight)
             }
             val ink = detectInkBlock(gray, aspectHint)
             if (ink != null && (edge == null || ink.score > edge.score)) {
-                return finish(ink, DetectMethod.TEXT_BLOCK, sx, sy, image)
+                return finish(ink, DetectMethod.TEXT_BLOCK, sx, sy, frameWidth, frameHeight)
             }
         }
 
         // A below-threshold edge result still beats nothing: the caller shows it as a
         // starting outline the user can nudge.
-        return edge?.let { finish(it, DetectMethod.EDGES, sx, sy, image) }
+        return edge?.let { finish(it, DetectMethod.EDGES, sx, sy, frameWidth, frameHeight) }
     }
 
     // ------------------------------------------------------------------ edges
@@ -313,9 +368,11 @@ object DocDetector {
         method: DetectMethod,
         sx: Double,
         sy: Double,
-        image: RgbaImage,
+        /** Size of the caller's image; the result is scaled back up to it and clamped to it. */
+        frameWidth: Int,
+        frameHeight: Int,
     ): Detection {
-        val scaledQuad = scored.quad.scaled(sx, sy).clampTo(image.width, image.height)
+        val scaledQuad = scored.quad.scaled(sx, sy).clampTo(frameWidth, frameHeight)
         val methodWeight = when (method) {
             DetectMethod.EDGES -> 1.0
             DetectMethod.BRIGHT_REGION -> 0.92

@@ -71,14 +71,18 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.app.ActivityCompat
@@ -88,12 +92,15 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.foundation.Image
 import com.kscanner.core.imaging.CaptureAdvice
 import com.kscanner.core.imaging.CaptureGate
+import com.kscanner.core.imaging.OutlineTracker
+import com.kscanner.core.imaging.Quad
 import com.kscanner.data.ScanMode
 import com.kscanner.ui.capture.ReviewState
 import com.kscanner.ui.capture.ScanSessionViewModel
 import com.kscanner.ui.components.rememberFileImage
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import java.util.concurrent.Executors
 import com.kscanner.KScannerApp
 
@@ -188,6 +195,17 @@ fun CameraScreen(
     var readiness by remember { mutableStateOf(0.0) }
     val gate = remember { CaptureGate() }
 
+    // The live outline. Detection runs on the analysis thread, drawing happens here on the main
+    // thread, and the tracker is the memory in between. Five density-independent pixels of
+    // deadband is the same figure the competing scanners use: it is the point at which a hand's
+    // tremor stops looking like the page moving.
+    val density = LocalDensity.current
+    val outlineTracker = remember(density) {
+        OutlineTracker(deadbandPx = with(density) { 5.dp.toPx().toDouble() })
+    }
+    var outline by remember { mutableStateOf<Quad?>(null) }
+    var previewSize by remember { mutableStateOf(IntSize.Zero) }
+
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
     val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
 
@@ -238,7 +256,16 @@ fun CameraScreen(
         }
     }
 
-    LaunchedEffect(cameraProvider, previewView, autoCapture) {
+    LaunchedEffect(outlineTracker) {
+        // The outline on screen is a tween, so it is read once per frame rather than once per
+        // detection. Assigning an unchanged Quad costs nothing: the state ignores equal values.
+        while (true) {
+            withFrameNanos { }
+            outline = outlineTracker.sample(SystemClock.elapsedRealtime())
+        }
+    }
+
+    LaunchedEffect(cameraProvider, previewView) {
         val provider = cameraProvider ?: return@LaunchedEffect
         val view = previewView ?: return@LaunchedEffect
 
@@ -249,40 +276,44 @@ fun CameraScreen(
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
             .build()
 
-        // Analysis stays bound only in automatic mode: there is no reason to burn battery
-        // measuring frames nobody is going to act on.
-        val analysis = if (autoCapture) {
-            ImageAnalysis.Builder()
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .setTargetResolution(android.util.Size(640, 480))
-                .build()
-                .also { useCase ->
-                    useCase.setAnalyzer(
-                        analysisExecutor,
-                        AutoCaptureAnalyzer(
-                            gate = gate,
-                            onAdvice = { next, progress ->
-                                mainHandler.post {
-                                    advice = next
-                                    readiness = progress
-                                }
-                            },
-                            onFire = { mainHandler.post { shoot() } },
-                        ),
-                    )
-                }
-        } else {
-            null
-        }
+        // Analysis stays bound whether or not the automatic shutter is on: the framing overlay
+        // needs the same frames, and unbinding to flip a toggle would restart the preview.
+        val analysis = ImageAnalysis.Builder()
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .setTargetResolution(android.util.Size(640, 480))
+            .build()
+            .also { useCase ->
+                useCase.setAnalyzer(
+                    analysisExecutor,
+                    AutoCaptureAnalyzer(
+                        gate = gate,
+                        tracker = outlineTracker,
+                        onAdvice = { next, progress ->
+                            mainHandler.post {
+                                advice = next
+                                readiness = progress
+                            }
+                        },
+                        onFire = { if (autoCapture) mainHandler.post { shoot() } },
+                        onOutline = { found, frame ->
+                            mainHandler.post {
+                                outlineTracker.accept(
+                                    detection = found,
+                                    frame = frame,
+                                    viewWidth = previewSize.width,
+                                    viewHeight = previewSize.height,
+                                    now = SystemClock.elapsedRealtime(),
+                                )
+                            }
+                        },
+                    ),
+                )
+            }
 
         val selector = CameraSelector.DEFAULT_BACK_CAMERA
         runCatching {
             provider.unbindAll()
-            val useCases = if (analysis != null) {
-                arrayOf<androidx.camera.core.UseCase>(preview, capture, analysis)
-            } else {
-                arrayOf<androidx.camera.core.UseCase>(preview, capture)
-            }
+            val useCases = arrayOf<androidx.camera.core.UseCase>(preview, capture, analysis)
             val bound = provider.bindToLifecycle(lifecycleOwner, selector, *useCases)
             camera = bound
             imageCapture = capture
@@ -298,7 +329,7 @@ fun CameraScreen(
         onDispose { }
     }
 
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
+    Box(Modifier.fillMaxSize().background(Color.Black).onSizeChanged { previewSize = it }) {
         AndroidView(
             factory = { ctx ->
                 PreviewView(ctx).apply {
@@ -309,6 +340,9 @@ fun CameraScreen(
             },
             modifier = Modifier.fillMaxSize(),
         )
+
+        // The outline the detector is following, drawn where the preview actually put the frame.
+        FramingOverlay(outline, Modifier.fillMaxSize())
 
         if (showGrid) {
             Canvas(Modifier.fillMaxSize()) {

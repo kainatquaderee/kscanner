@@ -80,6 +80,52 @@ class DocDetectorTest {
     }
 
     @Test
+    fun `the grayscale overload agrees with the colour one`() {
+        // The preview path hands the detector a luma frame directly. It has to land on the same
+        // outline as the still path, or the border drawn live would not match the crop taken.
+        val truth = Quad(
+            Pt(70.0, 60.0),
+            Pt(400.0, 42.0),
+            Pt(420.0, 540.0),
+            Pt(60.0, 520.0),
+        )
+        val photo = TestImages.documentOnBackground(480, 600, truth)
+
+        val colour = DocDetector.detect(photo)
+        val gray = DocDetector.detect(photo.toGray())
+
+        assertNotNull("the colour path found nothing, so the comparison is meaningless", colour)
+        assertNotNull("the grayscale path found nothing", gray)
+        val error = TestImages.maxCornerError(colour!!.quad, gray!!.quad)
+        assertTrue("outlines differed by $error px", error < 6.0)
+    }
+
+    @Test
+    fun `the grayscale overload rejects an image that is too small to analyse`() {
+        assertNull(DocDetector.detect(GrayImage(8, 8, IntArray(64))))
+    }
+
+    @Test
+    fun `work below the working edge is scaled back to the caller's frame`() {
+        // The live path detects on a small frame but draws on a big one, so the outline has to
+        // come back in the caller's coordinates.
+        val truth = Quad(
+            Pt(70.0, 60.0),
+            Pt(400.0, 42.0),
+            Pt(420.0, 540.0),
+            Pt(60.0, 520.0),
+        )
+        val photo = TestImages.documentOnBackground(480, 600, truth)
+
+        val reduced = DocDetector.detect(photo.toGray(), workingEdge = 240)
+
+        assertNotNull(reduced)
+        assertTrue(reduced!!.quad.points.all { it.x <= 480.0 && it.y <= 600.0 })
+        val error = TestImages.maxCornerError(truth, reduced.quad)
+        assertTrue("corner error was $error px", error < 20.0)
+    }
+
+    @Test
     fun `reported outline is always convex and inside the frame`() {
         val truth = Quad(
             Pt(70.0, 60.0),

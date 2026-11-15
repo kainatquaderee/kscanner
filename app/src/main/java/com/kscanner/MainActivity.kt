@@ -111,6 +111,7 @@ private fun KScannerNavHost() {
             CameraScreen(
                 documentId = documentId,
                 initialMode = settings.scanMode,
+                initialBatch = settings.batch,
                 session = session,
                 onCaptured = { path ->
                     navController.navigate(Routes.editor(path, documentId))

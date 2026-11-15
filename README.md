@@ -14,15 +14,22 @@ algorithms that ship are covered by the unit tests rather than by a device.
 **Capture**
 - CameraX preview with a 3×3 composition grid, torch toggle, and zoom chips at 1× and 2×,
   plus 4× where the camera's zoom range reaches it
-- Four capture modes, chosen from a chip row over the viewfinder:
-  - **Single** — one shot handed to the editor for manual corner adjustment
-  - **Batch** — shoot pages back to back; each is detected, straightened and appended
+- Three capture shapes, chosen from a chip row over the viewfinder, and a **Batch** toggle
+  that sits beside them. What one shot becomes and whether the run goes on are two
+  questions, so they are two controls:
+  - **Single** — one shot, detected and straightened. With Batch off it is handed to the
+    editor so the corners can be placed by hand; with Batch on it is appended and the camera
+    stays ready
   - **Book** — photograph a two-page spread and get the two pages cut along the gutter
   - **ID card** — capture the front, then the back; both sides are laid out on one sheet
-- In batch, book and ID-card capture, a strip of what has landed so far sits under the
-  shutter. Tapping a page opens the **review**: step through what the run has committed so
-  far, rotate one page a quarter turn, flip one over, and see — on the page itself — which
-  pages the automatic orientation pass could not decide
+- **Batch** works with any of the three shapes: on, the camera keeps shooting into the same
+  document until you press **Done**; off, it takes one unit and leaves
+- Whenever a run keeps going, a strip of what has landed so far sits under the shutter.
+  Tapping a page opens the **review**: step through what the run has committed so far, rotate
+  one page a quarter turn, flip one over, re-shoot it with the camera so the replacement takes
+  that page's place rather than landing at the end, and see — on the page itself — which pages
+  the automatic orientation pass could not decide. A re-take is offered where one shot means
+  one page, so it appears for Single with Batch on, and not for a spread or a card.
 - Optional **automatic shutter**: the camera measures each preview frame and fires when the
   page is sharp, evenly lit and has stayed that way for several frames (a filling ring shows
   the wait). It is deliberately unhurried so it does not fire at a half-settled hand.
@@ -137,9 +144,9 @@ Each release is built from a tag. You can build the same version from that tag y
 ```bash
 git clone https://github.com/kainatquaderee/kscanner
 cd kscanner
-git checkout v1.4.0                       # the tag you want to build
+git checkout v1.5.0                       # the tag you want to build
 echo "sdk.dir=$ANDROID_HOME" > local.properties
-./gradlew :app:assembleRelease -PversionName=1.4.0 -PversionCode=10400
+./gradlew :app:assembleRelease -PversionName=1.5.0 -PversionCode=10500
 aapt2 dump badging app/build/outputs/apk/release/app-release.apk | sed -n 1p
 ```
 
@@ -149,12 +156,12 @@ one — the release is signed with a key that is not in this repository, and the
 not reproducible byte for byte, so `sha256sum` will not match.
 
 Every release is signed with APK Signature Scheme v2 and v3. The published download is named
-after the version (`kscanner-1.4.0.apk`); confirm it really came from this project by comparing
+after the version (`kscanner-1.5.0.apk`); confirm it really came from this project by comparing
 signing certificates — the certificate, not a checksum of the file, is what Android compares
 when it installs an update:
 
 ```bash
-apksigner verify --print-certs kscanner-1.4.0.apk
+apksigner verify --print-certs kscanner-1.5.0.apk
 # Signer #1 certificate SHA-256 digest: b98924a5ba364b67ac61837550e3d2845e3b1c05ac95a42bdeb95230638066fd
 ```
 
@@ -194,7 +201,7 @@ core/ocr        OCR line model, storage codec, ML Kit wrapper
 core/io         the decode-cache key for a page file: path, length and modified time
 data            SQLite store, file layout, settings, ScanRepository
 ui              Compose screens (library, camera, editor, document, viewer, settings)
-  capture       ScanSessionViewModel: drives batch, book and ID-card capture
+  capture       ScanSessionViewModel: drives the runs that keep the camera open
 ```
 
 `ScanProcessor` is deliberately a pure function over pixel buffers. That is what lets the
@@ -204,7 +211,7 @@ layer.
 
 ## Tests
 
-169 unit tests in 18 classes, all runnable on a plain JVM:
+177 unit tests in 19 classes, all runnable on a plain JVM:
 
 ```bash
 ./gradlew :app:testDebugUnitTest
@@ -220,7 +227,10 @@ counts and text-layer placement, and the editor's viewport zoom and pan arithmet
 band extents and the 0-versus-180 decision as plain functions, and a contract that walks
 realistic prose fixtures — uneven light, a shadowed half, rules, underlines, a stamp, a
 signature — asserting that an upside-down page is either turned back upright or reported as
-undecided, never left upside down while claiming to have decided. One test writes a real
+undecided, never left upside down while claiming to have decided. The settings migration that
+turned the old **Batch** mode into a shape plus a toggle is pinned too: every stored value
+decodes to the behaviour it had, and nothing readable decodes to a mode this version cannot
+name. One test writes a real
 multi-page PDF to `app/build/verification/` so it can be checked with external tooling:
 
 ```bash
@@ -231,7 +241,7 @@ pdftoppm -png app/build/verification/ocr-sample.pdf page
 
 ## Known issues
 
-True of v1.4.0, stated rather than hidden:
+True of v1.5.0, stated rather than hidden:
 
 - **Folder grouping and bulk rename are not reachable in the UI.** The `documents` table has a
   `folder` column, `DocumentStore.listFolders` can read it and `ScanRepository.moveDocument`

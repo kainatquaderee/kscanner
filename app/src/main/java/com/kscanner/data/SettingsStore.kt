@@ -32,6 +32,14 @@ data class AppSettings(
     val autoFilter: Boolean = false,
     /** Mode the camera starts in. */
     val scanMode: ScanMode = ScanMode.SINGLE,
+    /**
+     * Keep the camera open and write every shot into one growing document, instead of handing
+     * a single shot to the editor.
+     *
+     * Independent of [scanMode]: a book spread can be captured once and taken to the document,
+     * or captured spread after spread into the same one.
+     */
+    val batch: Boolean = false,
 )
 
 /**
@@ -42,6 +50,14 @@ class SettingsStore(context: Context) {
 
     private val prefs = context.applicationContext
         .getSharedPreferences("kscanner.settings", Context.MODE_PRIVATE)
+
+    /**
+     * The stored mode, and the Batch setting that value implies.
+     *
+     * Read once, before [load] runs, because Batch was a mode of its own until 1.5.0: an
+     * older `BATCH` has to be translated into a shape plus a toggle rather than dropped.
+     */
+    private val storedMode = ScanMode.decodeStored(prefs.getString(KEY_SCAN_MODE, null))
 
     private val mutable = MutableStateFlow(load())
     val state: StateFlow<AppSettings> = mutable.asStateFlow()
@@ -73,9 +89,9 @@ class SettingsStore(context: Context) {
         autoRotate = prefs.getBoolean(KEY_AUTO_ROTATE, true),
         autoDeskew = prefs.getBoolean(KEY_AUTO_DESKEW, true),
         autoFilter = prefs.getBoolean(KEY_AUTO_FILTER, false),
-        scanMode = runCatching {
-            ScanMode.valueOf(prefs.getString(KEY_SCAN_MODE, ScanMode.SINGLE.name)!!)
-        }.getOrDefault(ScanMode.SINGLE),
+        scanMode = storedMode.first,
+        // An explicit Batch choice, once made, outweighs what the old mode implied.
+        batch = prefs.getBoolean(KEY_BATCH, storedMode.second),
     )
 
     private fun persist(settings: AppSettings) {
@@ -93,6 +109,7 @@ class SettingsStore(context: Context) {
             .putBoolean(KEY_AUTO_DESKEW, settings.autoDeskew)
             .putBoolean(KEY_AUTO_FILTER, settings.autoFilter)
             .putString(KEY_SCAN_MODE, settings.scanMode.name)
+            .putBoolean(KEY_BATCH, settings.batch)
             .apply()
     }
 
@@ -110,5 +127,6 @@ class SettingsStore(context: Context) {
         const val KEY_AUTO_DESKEW = "auto_deskew"
         const val KEY_AUTO_FILTER = "auto_filter"
         const val KEY_SCAN_MODE = "scan_mode"
+        const val KEY_BATCH = "batch"
     }
 }

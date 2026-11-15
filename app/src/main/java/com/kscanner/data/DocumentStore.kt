@@ -128,22 +128,107 @@ class DocumentStore(context: Context) {
         height: Int,
         flipDecided: Boolean? = null,
         now: Long = System.currentTimeMillis(),
+    ): Long = db().insert(
+        "pages",
+        null,
+        pageValues(
+            documentId = documentId,
+            index = index,
+            originalPath = originalPath,
+            processedPath = processedPath,
+            filterId = filterId,
+            rotation = rotation,
+            corners = corners,
+            width = width,
+            height = height,
+            flipDecided = flipDecided,
+            now = now,
+        ),
+    )
+
+    /**
+     * Puts a replacement page in the slot an existing one occupies, in one transaction.
+     *
+     * Atomic on purpose. Insert-then-delete as two separate writes would leave two rows claiming
+     * the same `page_index` if the app died in between, and that is a document which lists one
+     * page twice — nothing the user could put right from the UI.
+     *
+     * @return the replacement's row id
+     * @throws IllegalStateException if the row could not be written, in which case the old page is
+     *   still there untouched
+     */
+    fun replacePage(
+        pageId: Long,
+        documentId: Long,
+        index: Int,
+        originalPath: String,
+        processedPath: String,
+        filterId: Int,
+        rotation: Int,
+        corners: String?,
+        width: Int,
+        height: Int,
+        flipDecided: Boolean? = null,
+        now: Long = System.currentTimeMillis(),
     ): Long {
-        val values = ContentValues().apply {
-            put("document_id", documentId)
-            put("page_index", index)
-            put("original_path", originalPath)
-            put("processed_path", processedPath)
-            put("filter_id", filterId)
-            put("rotation", rotation)
-            put("corners", corners)
-            put("width", width)
-            put("height", height)
-            put("created_at", now)
-            // NULL means no orientation plan ran, which is not the same as "could not tell".
-            put("flip_decided", flipDecided?.let { if (it) 1 else 0 })
+        val database = db()
+        database.beginTransaction()
+        return try {
+            val newId = database.insert(
+                "pages",
+                null,
+                pageValues(
+                    documentId = documentId,
+                    index = index,
+                    originalPath = originalPath,
+                    processedPath = processedPath,
+                    filterId = filterId,
+                    rotation = rotation,
+                    corners = corners,
+                    width = width,
+                    height = height,
+                    flipDecided = flipDecided,
+                    now = now,
+                ),
+            )
+            // `insert` reports a failure by returning -1 rather than throwing, so this check is
+            // the only thing standing between a failed write and a committed delete. Throwing
+            // rolls the transaction back, which leaves the page being fixed exactly as it was.
+            check(newId != -1L) { "could not write the replacement page" }
+            database.delete("pages", "id = ?", arrayOf(pageId.toString()))
+            database.setTransactionSuccessful()
+            newId
+        } finally {
+            database.endTransaction()
         }
-        return db().insert("pages", null, values)
+    }
+
+    /** The column values of a page, shared so an insert and a replacement cannot drift apart. */
+    private fun pageValues(
+        documentId: Long,
+        index: Int,
+        originalPath: String,
+        processedPath: String,
+        filterId: Int,
+        rotation: Int,
+        corners: String?,
+        width: Int,
+        height: Int,
+        flipDecided: Boolean?,
+        now: Long,
+    ) = ContentValues().apply {
+        put("document_id", documentId)
+        put("page_index", index)
+        put("original_path", originalPath)
+        put("processed_path", processedPath)
+        put("filter_id", filterId)
+        put("rotation", rotation)
+        put("corners", corners)
+        put("width", width)
+        put("height", height)
+        put("created_at", now)
+        // NULL means no orientation plan ran, which is not the same as "could not tell".
+        put("flip_decided", flipDecided?.let { if (it) 1 else 0 })
     }
 
     fun getPages(documentId: Long): List<Page> =
@@ -210,6 +295,21 @@ class DocumentStore(context: Context) {
     fun countPages(documentId: Long): Int =
         db().rawQuery("SELECT COUNT(*) AS c FROM pages WHERE document_id = ?", arrayOf(documentId.toString()))
             .use { cursor -> if (cursor.moveToFirst()) cursor.int("c") else 0 }
+
+    /**
+     * The index a newly added page should take: one past the highest in use.
+     *
+     * Counting rows is *not* the same answer, and the difference is a user-visible defect.
+     * A run holding indices 0, 1 and 2 that loses the page at 1 still has 2 in use, but a
+     * count says two rows remain, so the next capture is written to index 2 — in the middle,
+     * ahead of the page already sitting there. Deriving from the maximum is also what keeps
+     * a replaced page in its own slot while later captures still land at the end.
+     */
+    fun nextPageIndex(documentId: Long): Int =
+        db().rawQuery(
+            "SELECT COALESCE(MAX(page_index) + 1, 0) AS n FROM pages WHERE document_id = ?",
+            arrayOf(documentId.toString()),
+        ).use { cursor -> if (cursor.moveToFirst()) cursor.int("n") else 0 }
 
     /** Rewrites page_index from the given order, atomically. */
     fun reorderPages(documentId: Long, orderedPageIds: List<Long>) {

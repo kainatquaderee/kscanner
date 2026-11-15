@@ -102,6 +102,14 @@ fun SettingsScreen(
                     )
                 }
             }
+            // Beside the shape, but not one of them: any of the three can run as a batch, and
+            // this is the switch that decides whether the camera keeps going after the first shot.
+            SwitchRow(
+                title = "Keep shooting into one document",
+                subtitle = "Add every shot to the same document instead of stopping after one",
+                checked = settings.batch,
+                onCheckedChange = viewModel::setBatch,
+            )
 
             HorizontalDivider(Modifier.padding(vertical = 12.dp))
             SectionHeader("Automatic correction")

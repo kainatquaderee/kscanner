@@ -48,11 +48,12 @@ data class ReviewState(val pages: List<Page>, val index: Int) {
 }
 
 /**
- * Drives the continuous capture modes.
+ * Drives the runs that keep the camera open.
  *
- * Batch, book and ID-card scanning all share one shape: a shot arrives, it is prepared
- * without asking the user anything, and pages land in a document that grows until the user
- * says it is done. The mode only changes what a single shot becomes.
+ * A shot arrives, it is prepared without asking anything, and pages land in a document. The
+ * mode decides what one shot becomes; the Batch toggle decides whether the run goes on after
+ * the shot or stops there. The two are orthogonal, so "a book spread, and keep going" is
+ * expressible.
  *
  * Everything pixel-level happens in the framework-free imaging engine, so this class is
  * thin: decode, decide, delegate, append.
@@ -64,6 +65,21 @@ class ScanSessionViewModel(
 
     var mode by mutableStateOf(settings.current.scanMode)
         private set
+
+    /**
+     * Whether the camera keeps shooting into one growing document.
+     *
+     * Session state like [mode], not a saved preference: the Settings screen decides what the
+     * camera opens with, and a change made here lasts as long as the run does.
+     */
+    var batch by mutableStateOf(settings.current.batch)
+        private set
+
+    /**
+     * True when a shot belongs in the editor rather than the document: the one-page shape with
+     * Batch off, which is the "place the corners yourself" case.
+     */
+    val capturesToEditor: Boolean get() = mode == ScanMode.SINGLE && !batch
 
     var busy by mutableStateOf(false)
         private set
@@ -90,6 +106,19 @@ class ScanSessionViewModel(
     var review by mutableStateOf<ReviewState?>(null)
         private set
 
+    /**
+     * The page the next shot will replace, or null when no re-take is armed.
+     *
+     * Held as a row id, not an index: the point of a re-take is that the page keeps its slot,
+     * so a position that moved is still the right page.
+     */
+    var retakeTarget by mutableStateOf<Long?>(null)
+        private set
+
+    /** 1-based position of [retakeTarget], so the prompt can name the page it will replace. */
+    var retakePosition by mutableStateOf<Int?>(null)
+        private set
+
     /** Guards the review's rotate/flip against a second tap landing mid-render. */
     private var reviewBusy = false
 
@@ -102,12 +131,22 @@ class ScanSessionViewModel(
         if (next == mode) return
         mode = next
         heldSide = null
+        // A re-take is armed against the shape of the run, so changing the shape has to drop it.
+        cancelRetake()
         status = if (next == ScanMode.ID_CARD) "Capture the front of the card" else null
     }
 
+    /** Turns the Batch toggle over: keep shooting into this document, or stop after one unit. */
+    fun updateBatch(next: Boolean) {
+        if (next == batch) return
+        batch = next
+        cancelRetake()
+    }
+
     /** Preferred mode when the camera opens, without persisting a change mid-session. */
-    fun prepare(initial: ScanMode) {
+    fun prepare(initial: ScanMode, initialBatch: Boolean) {
         mode = initial
+        batch = initialBatch
         heldSide = null
         status = if (initial == ScanMode.ID_CARD) "Capture the front of the card" else null
     }
@@ -120,10 +159,10 @@ class ScanSessionViewModel(
      * is what lets the review be an overlay the user can leave and come back from — the
      * session survives the whole batch either way.
      */
-    fun prepareIfNeeded(initial: ScanMode, documentId: Long?) {
+    fun prepareIfNeeded(initial: ScanMode, initialBatch: Boolean, documentId: Long?) {
         if (prepared) return
         prepared = true
-        prepare(initial)
+        prepare(initial, initialBatch)
         beginInto(documentId)
     }
 
@@ -134,6 +173,8 @@ class ScanSessionViewModel(
         pageCount = 0
         recent = emptyList()
         review = null
+        retakeTarget = null
+        retakePosition = null
         heldSide = null
         error = null
     }
@@ -142,8 +183,13 @@ class ScanSessionViewModel(
         if (busy) return
         busy = true
         error = null
+        // Claimed now rather than read when the shot lands: a re-take arms exactly one shot,
+        // and the capture after it must append like any other.
+        val target = retakeTarget
+        retakeTarget = null
+        retakePosition = null
         viewModelScope.launch {
-            runCatching { prepareAndStore(path) }
+            runCatching { if (target == null) prepareAndStore(path) else replacePage(path, target) }
                 .onSuccess { added -> if (added > 0) onPagesAdded(added) }
                 .onFailure { failure ->
                     error = failure.message ?: "That shot could not be processed."
@@ -154,13 +200,80 @@ class ScanSessionViewModel(
         }
     }
 
+    /**
+     * Puts a fresh capture where the page it replaces already sits.
+     *
+     * @return zero, because the document's page count has not changed: a caller must not treat
+     *   this as a page being added
+     */
+    private suspend fun replacePage(path: String, pageId: Long): Int {
+        val replacement = withContext(Dispatchers.Default) {
+            measure(path, mode).singlePage(path)
+        }
+        val newId = withContext(Dispatchers.IO) { repository.retakePage(pageId, replacement) }
+            ?: throw IllegalStateException("That page is no longer in this document.")
+
+        // The strip holds row ids and this page now has a new one, so the tile is swapped in
+        // place: the strip keeps its order, and the tile still opens the page it shows.
+        val thumbnail = withContext(Dispatchers.Default) {
+            BitmapBridge.toBitmap(Transforms.fitLongestEdge(replacement.image, 220)).asImageBitmap()
+        }
+        recent = recent.map { tile ->
+            if (tile.pageId == pageId) {
+                tile.copy(pageId = newId, bitmap = thumbnail, flipDecided = replacement.flipDecided)
+            } else {
+                tile
+            }
+        }
+        status = "Page replaced"
+        return 0
+    }
+
     private suspend fun prepareAndStore(path: String): Int {
+        val taken = mode
+        val measured = measure(path, taken)
+        return when (taken) {
+            ScanMode.SINGLE -> {
+                val page = withContext(Dispatchers.Default) { measured.singlePage(path) }
+                commit(listOf(page))
+            }
+
+            ScanMode.BOOK -> {
+                val halves = withContext(Dispatchers.Default) { measured.spreadPages() }
+                commit(halves)
+            }
+
+            ScanMode.ID_CARD -> {
+                val rendered = withContext(Dispatchers.Default) { measured.wholeShot() }
+                val first = heldSide
+                if (first == null) {
+                    heldSide = rendered
+                    status = "Front captured - now the back"
+                    0
+                } else {
+                    heldSide = null
+                    status = "Both sides captured"
+                    val sheet = withContext(Dispatchers.Default) { Composite.stacked(first, rendered) }
+                    commit(listOf(sheet.toPage(measured.filter.id, measured.flipDecided)))
+                }
+            }
+        }
+    }
+
+    /**
+     * Decodes a capture and takes the decisions every shape shares: which filter to use, how
+     * the shot should be turned, and the scan settings those imply.
+     *
+     * A re-take is measured here too, so a replacement is produced by the same rules as the
+     * page it replaces; a re-shot page cropped differently from its neighbours would be a
+     * defect of its own.
+     */
+    private suspend fun measure(path: String, taken: ScanMode): Measured {
         val current = settings.current
         val source = withContext(Dispatchers.Default) {
             BitmapBridge.decodeFile(File(path), current.maxImageEdge)
         } ?: throw IllegalStateException("the capture could not be decoded")
 
-        val mode = mode
         val filter = withContext(Dispatchers.Default) {
             if (current.autoFilter) {
                 Filters.auto(Transforms.fitLongestEdge(source, 1080))
@@ -173,7 +286,7 @@ class ScanSessionViewModel(
             AutoCrop.plan(
                 source,
                 workingEdge = 1080,
-                aspectHint = mode.aspectHint,
+                aspectHint = taken.aspectHint,
                 fixOrientation = current.autoRotate,
             )
         }
@@ -187,85 +300,73 @@ class ScanSessionViewModel(
             maxOutputEdge = current.maxImageEdge,
         )
 
-        return when (mode) {
-            ScanMode.SINGLE -> 0
-
-            ScanMode.BATCH -> {
-                val rendered = withContext(Dispatchers.Default) {
-                    ScanProcessor.process(source, base.copy(quad = plan.quad))
-                }
-                commit(
-                    listOf(
-                        ScanRepository.RenderedPage(
-                            image = rendered,
-                            originalPath = path,
-                            quad = plan.quad,
-                            rotation = plan.rotationDegrees,
-                            filterId = filter.id,
-                            flipDecided = plan.flipDecided,
-                        ),
-                    ),
-                )
-            }
-
-            ScanMode.BOOK -> {
-                val halves = withContext(Dispatchers.Default) {
-                    renderSpread(source, base, plan.quad, plan.flipDecided)
-                }
-                commit(halves)
-            }
-
-            ScanMode.ID_CARD -> {
-                val rendered = withContext(Dispatchers.Default) {
-                    ScanProcessor.process(source, base.copy(quad = plan.quad))
-                }
-                val first = heldSide
-                if (first == null) {
-                    heldSide = rendered
-                    status = "Front captured - now the back"
-                    0
-                } else {
-                    heldSide = null
-                    status = "Both sides captured"
-                    val sheet = withContext(Dispatchers.Default) { Composite.stacked(first, rendered) }
-                    commit(listOf(sheet.toPage(filter.id, plan.flipDecided)))
-                }
-            }
-        }
+        return Measured(
+            source = source,
+            filter = filter,
+            plan = plan,
+            base = base,
+        )
     }
 
     /**
-     * Cuts a spread into two pages. The gutter is found on the flattened spread, so the
-     * cut follows where the book actually folds rather than the geometric middle.
+     * A decoded shot and the decisions taken on it.
+     *
+     * Holding these together is what lets a first shot and a re-shot be rendered by one piece
+     * of code: the two paths differ in where the result goes, not in how it is made.
      */
-    private fun renderSpread(
-        source: RgbaImage,
-        base: ScanProcessor.Settings,
-        detected: Quad?,
-        flipDecided: Boolean?,
-    ): List<ScanRepository.RenderedPage> {
-        val rotated = Transforms.rotate(source, base.rotationDegrees)
-        val spread = detected ?: Quad.rect(
-            rotated.width.toDouble(),
-            rotated.height.toDouble(),
-        ).insetBy(0.05)
+    private class Measured(
+        private val source: RgbaImage,
+        val filter: ScanFilter,
+        private val plan: AutoCrop.Plan,
+        private val base: ScanProcessor.Settings,
+    ) {
+        /** Whether the automatic pass could decide the page's up direction. */
+        val flipDecided: Boolean? get() = plan.flipDecided
 
-        val flattened = runCatching {
-            Homography.warpPerspective(rotated, spread.clampTo(rotated.width, rotated.height), 900)
-        }.getOrNull()
-        val seam = flattened?.let { Spread.findSeam(it.toGray()) } ?: 0.5
-        val split = Spread.split(spread, seam)
+        /** The whole shot, cropped to the outline the detector proposed when there is one. */
+        fun wholeShot(): RgbaImage = ScanProcessor.process(source, base.copy(quad = plan.quad))
 
-        return listOf(split.left, split.right).map { half ->
-            val rendered = ScanProcessor.process(source, base.copy(quad = half))
-            ScanRepository.RenderedPage(
-                image = rendered,
-                originalPath = null,
-                quad = half,
-                rotation = base.rotationDegrees,
-                filterId = base.filter.id,
-                flipDecided = flipDecided,
+        /** The whole shot in the form a page is stored as. */
+        fun singlePage(originalPath: String?): ScanRepository.RenderedPage {
+            val image = wholeShot()
+            return ScanRepository.RenderedPage(
+                image = image,
+                originalPath = originalPath,
+                quad = plan.quad,
+                rotation = plan.rotationDegrees,
+                filterId = filter.id,
+                flipDecided = plan.flipDecided,
             )
+        }
+
+        /**
+         * Cuts a spread into two pages. The gutter is found on the flattened spread, so the
+         * cut follows where the book actually folds rather than the geometric middle.
+         */
+        fun spreadPages(): List<ScanRepository.RenderedPage> {
+            val rotated = Transforms.rotate(source, base.rotationDegrees)
+            val spread = plan.quad ?: Quad.rect(
+                rotated.width.toDouble(),
+                rotated.height.toDouble(),
+            ).insetBy(0.05)
+
+            val flattened = runCatching {
+                Homography.warpPerspective(rotated, spread.clampTo(rotated.width, rotated.height), 900)
+            }.getOrNull()
+            val seam = flattened?.let { Spread.findSeam(it.toGray()) } ?: 0.5
+            val split = Spread.split(spread, seam)
+
+            return listOf(split.left, split.right).map { half ->
+                val rendered = ScanProcessor.process(source, base.copy(quad = half))
+                ScanRepository.RenderedPage(
+                    image = rendered,
+                    originalPath = null,
+                    quad = half,
+                    rotation = base.rotationDegrees,
+                    filterId = base.filter.id,
+                    flipDecided = plan.flipDecided,
+                )
+            }
         }
     }
 
@@ -341,6 +442,42 @@ class ScanSessionViewModel(
     /** One-tap 180 for a page the automatic pass said it could not orient. */
     fun flipReviewPage() = actOnReviewPage("That page could not be turned over.") {
         repository.flipPage(it)
+    }
+
+    /**
+     * Whether the review should offer a re-take of the page on screen.
+     *
+     * One shot has to mean one page, which leaves out a spread (one shot, two pages) and a card
+     * (two shots, one page): "replace this page with one shot" has no single answer there. Batch
+     * has to be on for the same reason — a run that stops after one unit is not a run a
+     * replacement can be shot into.
+     */
+    val canRetake: Boolean
+        get() = mode.isOnePagePerShot && batch && documentId != null
+
+    /**
+     * Arms a re-take of the page the review is showing, and closes the review.
+     *
+     * The next shot replaces that page where it already sits. Nothing is written until that shot
+     * arrives, so leaving the camera without shooting leaves the page as it was — the re-take is
+     * a prompt, not an edit.
+     */
+    fun retakeReviewPage() {
+        val state = review ?: return
+        val page = state.current ?: return
+        if (!canRetake) return
+        retakeTarget = page.id
+        retakePosition = page.index + 1
+        status = "Re-take: shoot the replacement for page ${page.index + 1}"
+        review = null
+    }
+
+    /** Drops an armed re-take, leaving the page it pointed at untouched. */
+    fun cancelRetake() {
+        if (retakeTarget == null) return
+        retakeTarget = null
+        retakePosition = null
+        status = null
     }
 
     private fun actOnReviewPage(failure: String, action: suspend (Long) -> Boolean) {

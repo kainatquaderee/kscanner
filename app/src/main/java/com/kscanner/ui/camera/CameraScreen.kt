@@ -23,6 +23,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -42,6 +44,7 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.outlined.RotateRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Done
+import androidx.compose.material.icons.outlined.CheckCircleOutline
 import androidx.compose.material.icons.outlined.CreditCard
 import androidx.compose.material.icons.outlined.Flip
 import androidx.compose.material.icons.outlined.FlashOff
@@ -95,13 +98,16 @@ import java.util.concurrent.Executors
 import com.kscanner.KScannerApp
 
 /**
- * Camera capture built on CameraX. Captures are written straight to a temporary file and
- * handed to the editor, so no bitmap ever crosses the activity boundary.
+ * Camera capture built on CameraX. A capture is written straight to a temporary file and either
+ * handed to the editor by path, or processed into a document in place; no bitmap ever crosses
+ * the activity boundary either way.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun CameraScreen(
     documentId: Long?,
     initialMode: ScanMode,
+    initialBatch: Boolean,
     session: ScanSessionViewModel,
     onCaptured: (String) -> Unit,
     onFinished: (Long) -> Unit,
@@ -112,7 +118,7 @@ fun CameraScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
 
     LaunchedEffect(Unit) {
-        session.prepareIfNeeded(initialMode, documentId)
+        session.prepareIfNeeded(initialMode, initialBatch, documentId)
     }
 
     var hasPermission by remember {
@@ -203,10 +209,15 @@ fun CameraScreen(
             object : ImageCapture.OnImageSavedCallback {
                 override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
                     capturing = false
-                    if (session.mode.isContinuous) {
-                        session.consume(file.absolutePath)
-                    } else {
+                    if (session.capturesToEditor) {
                         onCaptured(file.absolutePath)
+                    } else {
+                        session.consume(file.absolutePath) {
+                            // Only pages that were actually added get here — a re-take adds
+                            // none — so with Batch off, the shot that completes the unit is
+                            // the one that hands over to the document.
+                            if (!session.batch) session.documentId?.let(onFinished)
+                        }
                     }
                 }
 
@@ -354,15 +365,17 @@ fun CameraScreen(
             }
         }
 
-        // Mode selector: what each shot becomes.
-        Row(
+        // What the next shot becomes (mode), and whether the run goes on after it (Batch).
+        // Two different questions, so they are two different controls: Batch is a toggle, and
+        // it is coloured differently from the mode chips so it does not read as a fourth mode.
+        FlowRow(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(top = 56.dp)
                 .align(Alignment.TopCenter)
                 .padding(horizontal = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
-            verticalAlignment = Alignment.CenterVertically,
+            verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             for (option in ScanMode.entries) {
                 ModeChip(
@@ -371,6 +384,10 @@ fun CameraScreen(
                     onClick = { session.updateMode(option) },
                 )
             }
+            BatchChip(
+                active = session.batch,
+                onClick = { session.updateBatch(!session.batch) },
+            )
         }
 
         // Bottom controls
@@ -408,7 +425,7 @@ fun CameraScreen(
 
             Text(
                 text = buildString {
-                    append(session.mode.hint)
+                    append(runHint(session.mode, session.batch))
                     if (documentId != null) append("  ·  into the open document")
                 },
                 color = Color.White.copy(alpha = 0.8f),
@@ -416,10 +433,11 @@ fun CameraScreen(
                 modifier = Modifier.padding(bottom = 12.dp),
             )
 
-            // Page strip for the continuous modes: a glance at what has landed so far, and the
-            // way into the review. Newest commit first, and within a commit in reading order,
-            // so a tile carries its own page number rather than counting back from the front.
-            if (session.mode.isContinuous && session.recent.isNotEmpty()) {
+            // Page strip for the runs that write pages directly: a glance at what has landed so
+            // far, and the way into the review. Newest commit first, and within a commit in
+            // reading order, so a tile carries its own page number rather than counting back
+            // from the front.
+            if (!session.capturesToEditor && session.recent.isNotEmpty()) {
                 LazyRow(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -441,6 +459,37 @@ fun CameraScreen(
                                     onClickLabel = "Open page $number of $total",
                                 ) { session.openReview(tile.pageId) },
                         )
+                    }
+                }
+            }
+
+            // An armed re-take changes what the next shot does, so it is stated on screen with
+            // a way out: the shot replaces that one page, and the run carries on from there.
+            session.retakePosition?.let { position ->
+                Surface(
+                    shape = RoundedCornerShape(20.dp),
+                    color = MaterialTheme.colorScheme.primary,
+                    contentColor = Color.White,
+                    modifier = Modifier.padding(bottom = 10.dp),
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(start = 14.dp, end = 2.dp),
+                    ) {
+                        Text(
+                            text = "Re-take page $position",
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                        IconButton(
+                            onClick = session::cancelRetake,
+                            modifier = Modifier.size(32.dp),
+                        ) {
+                            Icon(
+                                Icons.Filled.Close,
+                                contentDescription = "Cancel re-take",
+                                modifier = Modifier.size(16.dp),
+                            )
+                        }
                     }
                 }
             }
@@ -505,7 +554,7 @@ fun CameraScreen(
                 )
             }
 
-            if (session.mode.isContinuous) {
+            if (!session.capturesToEditor) {
                 Spacer(Modifier.height(14.dp))
                 Button(
                     onClick = { session.documentId?.let(onFinished) ?: onClose() },
@@ -539,10 +588,12 @@ fun CameraScreen(
             ReviewOverlay(
                 state = state,
                 error = session.error,
+                canRetake = session.canRetake,
                 onClose = session::closeReview,
                 onStep = session::stepReview,
                 onRotate = { session.rotateReviewPage(clockwise = true) },
                 onFlip = session::flipReviewPage,
+                onRetake = session::retakeReviewPage,
             )
         }
     }
@@ -550,17 +601,20 @@ fun CameraScreen(
 
 /**
  * The full-bleed review of a run: what was committed, page by page, with the rotate and
- * flip the automatic pass may have got wrong. Reads the stored rows through
- * [ScanSessionViewModel.review], so it can reach page 1 of a run longer than the strip.
+ * flip the automatic pass may have got wrong, and a way to shoot one page again where a single
+ * shot is a single page. Reads the stored rows through [ScanSessionViewModel.review], so it can
+ * reach page 1 of a run longer than the strip.
  */
 @Composable
 private fun ReviewOverlay(
     state: ReviewState,
     error: String?,
+    canRetake: Boolean,
     onClose: () -> Unit,
     onStep: (Int) -> Unit,
     onRotate: () -> Unit,
     onFlip: () -> Unit,
+    onRetake: () -> Unit,
 ) {
     val page = state.current
     val image = rememberFileImage(page?.processedPath, maxEdge = 1800, revision = page?.renderRevision)
@@ -665,6 +719,29 @@ private fun ReviewOverlay(
                         tint = if (state.index > 0) Color.White else Color.White.copy(alpha = 0.35f),
                     )
                 }
+                // Re-shoot this page where it sits, rather than deleting it and dragging the
+                // new one back from the end. Offered only where one shot means one page.
+                if (canRetake) {
+                    Surface(
+                        onClick = onRetake,
+                        shape = RoundedCornerShape(20.dp),
+                        color = Color.White.copy(alpha = 0.16f),
+                        contentColor = Color.White,
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                        ) {
+                            Icon(
+                                Icons.Outlined.PhotoCamera,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text("Re-take", style = MaterialTheme.typography.labelLarge)
+                        }
+                    }
+                }
                 IconButton(
                     onClick = { onStep(1) },
                     enabled = state.index < state.pages.lastIndex,
@@ -679,6 +756,17 @@ private fun ReviewOverlay(
             }
         }
     }
+}
+
+/**
+ * What the run will do next, in the mode's own terms.
+ *
+ * The one-page shape says something different with Batch on: the shot no longer goes to the
+ * editor, so repeating it is what builds the document.
+ */
+private fun runHint(mode: ScanMode, batch: Boolean): String = when {
+    mode == ScanMode.SINGLE && batch -> "Page after page"
+    else -> mode.hint
 }
 
 @Composable
@@ -696,7 +784,6 @@ private fun ModeChip(mode: ScanMode, active: Boolean, onClick: () -> Unit) {
             Icon(
                 imageVector = when (mode) {
                     ScanMode.SINGLE -> Icons.Outlined.Description
-                    ScanMode.BATCH -> Icons.Outlined.PhotoLibrary
                     ScanMode.BOOK -> Icons.AutoMirrored.Outlined.MenuBook
                     ScanMode.ID_CARD -> Icons.Outlined.CreditCard
                 },
@@ -705,6 +792,35 @@ private fun ModeChip(mode: ScanMode, active: Boolean, onClick: () -> Unit) {
             )
             Spacer(Modifier.width(5.dp))
             Text(text = mode.label, style = MaterialTheme.typography.labelSmall)
+        }
+    }
+}
+
+/**
+ * The Batch toggle: keep shooting into the document, or stop after one unit.
+ *
+ * Not a mode, so it does not look like one — a mode chip lights up white, and this looks like
+ * what it is, a switch that is on.
+ */
+@Composable
+private fun BatchChip(active: Boolean, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(16.dp),
+        color = if (active) MaterialTheme.colorScheme.primary else Color.Black.copy(alpha = 0.42f),
+        contentColor = Color.White,
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+        ) {
+            Icon(
+                imageVector = if (active) Icons.Outlined.CheckCircleOutline else Icons.Outlined.PhotoLibrary,
+                contentDescription = null,
+                modifier = Modifier.size(15.dp),
+            )
+            Spacer(Modifier.width(5.dp))
+            Text(text = "Batch", style = MaterialTheme.typography.labelSmall)
         }
     }
 }

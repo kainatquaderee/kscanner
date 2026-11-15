@@ -110,7 +110,9 @@ class ScanRepository(
         }
 
         val pageIds = ArrayList<Long>(pages.size)
-        var index = withContext(Dispatchers.IO) { store.countPages(id) }
+        // Not the row count: after a delete or a retake, counting puts the next page in the
+        // middle of the document. See DocumentStore.nextPageIndex.
+        var index = withContext(Dispatchers.IO) { store.nextPageIndex(id) }
         for (page in pages) {
             val pageFile = withContext(Dispatchers.IO) { storage.newPageFile(id, "page") }
             if (!BitmapBridge.saveJpeg(page.image, pageFile, settings.current.jpegQuality)) {
@@ -347,6 +349,88 @@ class ScanRepository(
 
     /** One-tap 180 for a page the automatic pass could not decide. */
     suspend fun flipPage(pageId: Long): Boolean = rotateBy(pageId, 180)
+
+    /**
+     * Replaces one page with a fresh capture, in the slot it already occupies.
+     *
+     * Re-shooting through the strip would otherwise mean deleting the bad page and taking
+     * another one, which lands at the end of the document and leaves the user to drag it back.
+     * Here the replacement takes the old row's index, so the run's order is untouched, and the
+     * old row's files go with it.
+     *
+     * The pixels are written first and the row swap is one transaction, so the only way to lose
+     * the page being fixed is for the write itself to fail — nothing is touched until the
+     * replacement has been written out in full.
+     *
+     * @return the row id of the replacement, or null when the page is gone or its pixels could
+     *   not be written
+     * @throws IllegalStateException if the row could not be swapped, in which case the original
+     *   page and its files are still exactly as they were
+     */
+    suspend fun retakePage(pageId: Long, replacement: RenderedPage): Long? =
+        withContext(Dispatchers.Default) {
+            val previous = withContext(Dispatchers.IO) { store.getPage(pageId) }
+                ?: return@withContext null
+            val documentId = previous.documentId
+
+            val pageFile = withContext(Dispatchers.IO) { storage.newPageFile(documentId, "page") }
+            if (!BitmapBridge.saveJpeg(replacement.image, pageFile, settings.current.jpegQuality)) {
+                return@withContext null
+            }
+
+            val originalFile = withContext(Dispatchers.IO) {
+                val source = replacement.originalPath
+                if (settings.current.keepOriginals && source != null) {
+                    val dest = storage.newPageFile(documentId, "original")
+                    if (BitmapBridge.copyToFile(File(source).inputStream(), dest)) dest else null
+                } else {
+                    null
+                }
+            }
+
+            val newId = try {
+                withContext(Dispatchers.IO) {
+                    store.replacePage(
+                        pageId = pageId,
+                        documentId = documentId,
+                        index = previous.index,
+                        originalPath = (originalFile ?: pageFile).absolutePath,
+                        processedPath = pageFile.absolutePath,
+                        filterId = replacement.filterId,
+                        rotation = replacement.rotation,
+                        corners = replacement.quad?.let { Corners.serialize(it) },
+                        width = replacement.image.width,
+                        height = replacement.image.height,
+                        flipDecided = replacement.flipDecided,
+                    )
+                }
+            } catch (failure: Exception) {
+                // The row swap was rolled back, so the page being fixed is intact, but the files
+                // just written are not referenced by anything: they go with the failure.
+                withContext(Dispatchers.IO) {
+                    storage.deleteFile(pageFile.absolutePath)
+                    storage.deleteFile(originalFile?.absolutePath)
+                }
+                throw failure
+            }
+
+            // Only once the row is in place: the files the old row pointed at are the last copy
+            // of what was there, so they go after the swap and never before it.
+            withContext(Dispatchers.IO) {
+                storage.deleteFile(previous.processedPath)
+                // The two paths are the same file for a page written with `keepOriginals` off,
+                // which the first delete has already removed and which must not be freed twice.
+                if (previous.originalPath != previous.processedPath) {
+                    storage.deleteFile(previous.originalPath)
+                }
+            }
+
+            if (settings.current.autoOcr) {
+                runCatching { runOcrForPage(documentId, previous.index) }
+            }
+            withContext(Dispatchers.IO) { refreshThumbnail(documentId) }
+            newId
+        }
 
     /**
      * Guarantees [page]'s original holds pixels with no rotation baked in.

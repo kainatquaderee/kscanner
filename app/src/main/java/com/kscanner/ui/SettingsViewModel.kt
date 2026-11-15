@@ -33,5 +33,13 @@ class SettingsViewModel(private val settings: SettingsStore) : ViewModel() {
 
     fun setScanMode(mode: com.kscanner.data.ScanMode) = settings.update { it.copy(scanMode = mode) }
 
+    /**
+     * Whether the camera opens still shooting into one document.
+     *
+     * Kept beside the start mode because that is where it is chosen, not because it is part of
+     * it: any of the three shapes can run as a batch.
+     */
+    fun setBatch(enabled: Boolean) = settings.update { it.copy(batch = enabled) }
+
     fun current(): AppSettings = settings.current
 }

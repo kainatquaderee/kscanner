@@ -37,6 +37,8 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -84,6 +86,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -432,7 +435,7 @@ fun CameraScreen(
                 }
                 BatchChip(
                     active = session.batch,
-                    onClick = { session.updateBatch(!session.batch) },
+                    onToggle = { session.updateBatch(it) },
                 )
             }
         }
@@ -821,7 +824,11 @@ private fun runHint(mode: ScanMode, batch: Boolean): String = when {
 @Composable
 private fun ModeChip(mode: ScanMode, active: Boolean, onClick: () -> Unit) {
     Surface(
-        onClick = onClick,
+        modifier = Modifier.selectable(
+            selected = active,
+            role = Role.RadioButton,
+            onClick = onClick,
+        ),
         shape = RoundedCornerShape(16.dp),
         color = if (active) Color.White else Color.Black.copy(alpha = 0.42f),
         contentColor = if (active) Color.Black else Color.White,
@@ -849,12 +856,17 @@ private fun ModeChip(mode: ScanMode, active: Boolean, onClick: () -> Unit) {
  * The Batch toggle: keep shooting into the document, or stop after one unit.
  *
  * Not a mode, so it does not look like one — a mode chip lights up white, and this looks like
- * what it is, a switch that is on.
+ * what it is, a switch that is on. It *is* one to TalkBack: `toggleable` with `Role.Switch` is
+ * what makes the state audible, since the colour is the only other thing that carries it.
  */
 @Composable
-private fun BatchChip(active: Boolean, onClick: () -> Unit) {
+private fun BatchChip(active: Boolean, onToggle: (Boolean) -> Unit) {
     Surface(
-        onClick = onClick,
+        modifier = Modifier.toggleable(
+            value = active,
+            role = Role.Switch,
+            onValueChange = onToggle,
+        ),
         shape = RoundedCornerShape(16.dp),
         color = if (active) MaterialTheme.colorScheme.primary else Color.Black.copy(alpha = 0.42f),
         contentColor = Color.White,

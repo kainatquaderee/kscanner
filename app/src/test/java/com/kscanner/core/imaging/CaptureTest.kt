@@ -157,4 +157,41 @@ class CaptureTest {
         assertEquals(0, gray.get(0, 0))
         assertEquals(10, gray.get(1, 0))
     }
+
+    @Test
+    fun `a sampled frame is described by the image that was sampled`() {
+        // The camera's own 640x480 would describe an outline found here as half its real size, and
+        // draw it half a frame away from where the page is. The frame a quad is in is the frame
+        // that was searched, which is the sampled one.
+        val sampled = Luma.sampleFrame(
+            buffer = ByteBuffer.allocate(640 * 480),
+            width = 640,
+            height = 480,
+            rowStride = 640,
+            targetEdge = 320,
+            rotationDegrees = 90,
+        )
+
+        assertEquals(320, sampled.gray.width)
+        assertEquals(240, sampled.gray.height)
+        assertEquals(320, sampled.frame.width)
+        assertEquals(240, sampled.frame.height)
+        assertEquals("the camera's turn still applies", 90, sampled.frame.rotationDegrees)
+    }
+
+    @Test
+    fun `a frame small enough to be read whole is described as itself`() {
+        val sampled = Luma.sampleFrame(
+            buffer = ByteBuffer.allocate(300 * 200),
+            width = 300,
+            height = 200,
+            rowStride = 300,
+            targetEdge = 320,
+        )
+
+        assertEquals(1, Luma.stepFor(300, 200, targetEdge = 320))
+        assertEquals(300, sampled.frame.width)
+        assertEquals(200, sampled.frame.height)
+        assertEquals(0, sampled.frame.rotationDegrees)
+    }
 }

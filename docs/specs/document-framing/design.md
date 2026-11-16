@@ -1,6 +1,7 @@
 # Design — Live document framing over the preview
 
-Accompanies unreleased work targeting v1.6.0. The PRD's acceptance criteria are cited as AC-n.
+Accompanies v1.6.0, and records the defect v1.6.1 fixes (§4a). The PRD's acceptance criteria are
+cited as AC-n.
 
 ## 0. Method, and what counts as evidence here
 
@@ -106,6 +107,9 @@ in real terms every time the preview's scale changed.
 The outing of the live path — `Luma.grayFromPlane` decimates rather than averages — is a known
 difference from the still path and is recorded in the README's known issues rather than papered over.
 
+The plane is read through `Luma.sampleFrame`, which returns the sampled image and the `PreviewFrame`
+describing *it*, as one value. They may not be separated: §4a records what separating them cost.
+
 ## 4. FrameGeometry — where the outline is drawn
 
 Two transformations sit between a detected quad and the drawn one, and both are places where a
@@ -127,6 +131,43 @@ function; `fillCenter` handles the layout; `toView` composes them.
 Rotation is *rounded* to the nearest quarter turn rather than validated against 0/90/180/270. An
 overlay drawn a quarter turn out for one frame is a spectacle, but it beats a border that is
 silently absent because a device reported 270.5.
+
+## 4a. The defect v1.6.1 fixes: which frame the quad is in
+
+v1.6.0 drew the border off the page on the owner's very first shot. §8's first risk expected a
+quarter-turn error; what the device found was an error in the frame's *size*.
+
+**Symptom, from the owner's two photographs of the camera screen.** The border was drawn at a
+fraction of the page's size, thrown to the right, with its right-hand edge running outside the
+phone; the dimmed area covered the wrong part of the picture, which is the same error seen from the
+other end.
+
+**Cause.** `Luma.grayFromPlane` decimates — it reads every `step`-th pixel — so the `GrayImage`
+handed to `DocDetector.detect` is `1/step` of the analysis frame: 2 at the 640x480 the analyser
+requests, 5 at 1600x1200, 13 at 4032x3024. The detector answers in *that* image's pixels.
+`AutoCaptureAnalyzer` reported the answer as `PreviewFrame(image.width, image.height, …)` — the
+camera's size. Two consequences, both visible on the phone:
+
+1. `fillCenter` scaled by `viewLongest / cameraLongest`, which is `1/step` of the true scale, so the
+   border was drawn at `1/step` of its size.
+2. `Transforms.rotateQuad90` reflects with `(srcHeight - 1 - y)`, so the camera's height instead of
+   the sampled one displaced the quad sideways by `cameraHeight - sampledHeight` before scaling —
+   the reason the error was not a neat shrink about the middle but a border thrown to one side.
+
+**Measured on the JVM** (`LiveOutlineTest`'s fixture: a page photographed to fill a 640x480 frame,
+rotation 90, a 1080x2400 view). The page's own corners are on screen at (-214, 300), (1361, 225),
+(1286, 2175), (-289, 2100). Described by the sampled frame, the detected outline reproduces them to
+within 5 px. Described by the camera's frame, the same outline is drawn at (611, 148), (1402, 110),
+(1363, 1088), (573, 1050): half size, pushed up and to the right, its right-hand edge 322 px past a
+1080 px screen.
+
+**Fix.** The two facts are no longer separable. `Luma.sampleFrame` returns `Luma.SampledFrame` — the
+sampled image and the `PreviewFrame` for it — so the analyser can only pass on the frame that was
+searched. `LiveOutlineTest` pins both halves: the border lands on the page at all four rotations
+(within 20 px, the detector's own error at a 320 px working edge), and the camera's size for a
+sampled quad is more than 200 px out, asserted so that restoring the old bookkeeping fails loudly.
+`CaptureTest` pins the sampling contract directly: a 640x480 plane at `targetEdge` 320 is described
+as 320x240, not as 640x480.
 
 ## 5. OutlineTracker — what to draw now
 
@@ -175,7 +216,7 @@ controls — so it can never intercept a touch, which is AC-7.
 
 ## 7. Tests
 
-33 tests cover the three pieces — 27 of them new — all plain JVM:
+35 tests cover the four pieces — 29 of them new — all plain JVM:
 
 - `FrameGeometryTest` (11) — each of the four rotations against hand-computed expectations, a
   lopsided fixture so a no-op turn cannot pass, turns counted modulo a full turn, the fill-and-centre
@@ -188,8 +229,11 @@ controls — so it can never intercept a touch, which is AC-7.
 - `DocDetectorTest` (3 new, 9 total) — the grayscale overload agrees with the colour one within 6 px
   (the overlay must be drawn where the crop will be taken), rejects an image too small to analyse,
   and scales work done below the working edge back into the caller's frame.
+- `LiveOutlineTest` (2) — the live journey end to end on a camera-sized fixture: sampled, detected,
+  and drawn at each of the four rotations, checked against the quad the page was photographed
+  through; plus the size of the error a mismatched frame causes, which is §4a's defect.
 
-Full suite: 204 tests in 21 classes, 0 failures.
+Full suite: 208 tests in 22 classes, 0 failures.
 
 ## 8. Risks, and what is not verified
 
@@ -197,7 +241,16 @@ Full suite: 204 tests in 21 classes, 0 failures.
   documented meaning of `rotationDegrees` and against `PreviewView.FILL_CENTER`'s definition, not
   against a real device's frames and a real preview layout. If a device reports something unusual
   for its front/back sensor, the border would appear rotated; the fix would be entirely inside
-  `quarterTurns`.
+  `quarterTurns`. The device has since been exercised once and the error it found was not in the
+  turn (§4a), but only the frames a test can construct are actually covered.
+- **DEVICE — v1.6.1's fix is verified on the JVM, not on the phone.** The size of the frame the
+  camera actually delivers — and therefore the sampling step the defect scaled by — is not known
+  here, because no device was attached when this was written. The owner's first shot is the check.
+- **A border can be drawn outside the screen, and is not clamped.** The preview fills the screen by
+  cropping the frame, so a page that reaches the frame's sides gets a border whose side lies beyond
+  the visible area. Left that way deliberately: the outline's job is to show what the crop will
+  keep, and clamping it to the viewport would make the border say the page ends at the screen edge.
+  Recorded in the README's known issues.
 - **DEVICE — the visual result is unverified.** Contrast of `ScanTealLight` over a real page under
   real light, and whether 0.42 alpha reads as "dimmed" rather than "blacked out", are judgement calls
   made from a desk.

@@ -32,8 +32,9 @@ class AutoCaptureAnalyzer(
     private val onAdvice: (CaptureAdvice, Double) -> Unit,
     private val onFire: () -> Unit,
     /**
-     * A found outline, with the frame it was found in. Only confident answers are reported:
-     * a missing detection is not news, since the tracker keeps drawing what it has.
+     * A found outline, with the frame it was found in — the *sampled* frame, whose pixels the
+     * outline is expressed in. Only confident answers are reported: a missing detection is not
+     * news, since the tracker keeps drawing what it has.
      */
     private val onOutline: (Detection, PreviewFrame) -> Unit,
     /** Longest edge of the analysed frame. Small on purpose: this runs on every frame. */
@@ -44,15 +45,20 @@ class AutoCaptureAnalyzer(
     override fun analyze(image: ImageProxy) {
         try {
             val plane = image.planes.firstOrNull() ?: return
-            val step = Luma.stepFor(image.width, image.height, workingEdge)
-            val gray = Luma.grayFromPlane(
+            // The sample and the frame it is in are read as one value: the detector answers in the
+            // sampled image's pixels, and the drawing side has to be told those pixels' size, not
+            // the camera's. Describing one with the other is a scale error of the sampling step,
+            // which puts the border beside the page — and, on a phone-shaped view, off the screen.
+            val sampled = Luma.sampleFrame(
                 buffer = plane.buffer,
                 width = image.width,
                 height = image.height,
                 rowStride = plane.rowStride,
                 pixelStride = plane.pixelStride,
-                step = step,
+                targetEdge = workingEdge,
+                rotationDegrees = image.imageInfo.rotationDegrees,
             )
+            val gray = sampled.gray
 
             val report = Quality.analyse(gray)
             val ready = gate.observe(report)
@@ -64,7 +70,7 @@ class AutoCaptureAnalyzer(
                 // The fallbacks are for a still photograph, where an outline around the ink is
                 // better than none: a live border hugging the text would read as the page edge.
                 DocDetector.detect(gray, allowFallbacks = false)?.let { found ->
-                    onOutline(found, PreviewFrame(image.width, image.height, image.imageInfo.rotationDegrees))
+                    onOutline(found, sampled.frame)
                 }
             }
         } catch (_: Throwable) {

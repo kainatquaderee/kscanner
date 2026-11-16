@@ -1,7 +1,8 @@
 # PRD — Live document framing over the preview
 
-Version: unreleased, targeting v1.6.0. Requested by the owner, in these words: "how exactly does
-scanning work in camscanner … and make something similar in kscanner".
+Version: v1.6.0, whose framing-overlay defect is corrected in v1.6.1 (see the design's §4a).
+Requested by the owner, in these words: "how exactly does scanning work in camscanner … and make
+something similar in kscanner".
 
 ## 0. Scope in one paragraph
 

@@ -56,4 +56,35 @@ object Luma {
         if (longest <= targetEdge) return 1
         return max(1, (longest.toDouble() / targetEdge).roundToInt())
     }
+
+    /**
+     * A frame sampled for detection, and the description of the frame it is in.
+     *
+     * The two travel together because only together are they true: an outline found in [gray] is
+     * expressed in [gray]'s pixels, and [frame] is what a caller needs to put it on screen. Describing
+     * the same outline with the camera's own size is a silent error of [stepFor] — the outline is
+     * then drawn at `1/step` of its size, about the wrong centre, which is far enough to put it
+     * beside the page and, often, outside the screen.
+     */
+    data class SampledFrame(val gray: GrayImage, val frame: PreviewFrame)
+
+    /**
+     * Reads the plane at [targetEdge], and reports the size of *that* image.
+     *
+     * @param rotationDegrees the turn the camera says puts the frame upright; it applies unchanged
+     *   to the sampled image, whose axes are the frame's axes.
+     */
+    fun sampleFrame(
+        buffer: ByteBuffer,
+        width: Int,
+        height: Int,
+        rowStride: Int,
+        pixelStride: Int = 1,
+        targetEdge: Int,
+        rotationDegrees: Int = 0,
+    ): SampledFrame {
+        val step = stepFor(width, height, targetEdge)
+        val gray = grayFromPlane(buffer, width, height, rowStride, pixelStride, step)
+        return SampledFrame(gray, PreviewFrame(gray.width, gray.height, rotationDegrees))
+    }
 }

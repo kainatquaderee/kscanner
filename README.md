@@ -223,7 +223,7 @@ layer.
 
 ## Tests
 
-204 unit tests in 21 classes, all runnable on a plain JVM:
+208 unit tests in 22 classes, all runnable on a plain JVM:
 
 ```bash
 ./gradlew :app:testDebugUnitTest
@@ -242,7 +242,11 @@ preview uses — and `core/imaging/OutlineTracker.kt` is the decision of what to
 against a clock the test owns: the throttle, the confidence gate, the deadband, the tween and
 the hold, all without a camera and without sleeping. The detector is pinned from grayscale too,
 since that is what the preview hands it, and the outline it returns there has to match the one
-the still path returns. The orientation work is pinned by tests at two levels: the
+the still path returns. One test starts where the camera does — a camera-sized plane, sampled the
+way the analyser samples it — and checks that the border lands on the page at each of the four
+rotations a camera can report; it exists because the release that first drew the border had the
+two ends of that journey disagreeing about which frame the outline was in, and drew it beside the
+page instead of on it. The orientation work is pinned by tests at two levels: the
 band extents and the 0-versus-180 decision as plain functions, and a contract that walks
 realistic prose fixtures — uneven light, a shadowed half, rules, underlines, a stamp, a
 signature — asserting that an upside-down page is either turned back upright or reported as
@@ -260,8 +264,7 @@ pdftoppm -png app/build/verification/ocr-sample.pdf page
 
 ## Known issues
 
-True of v1.5.0 as released, stated rather than hidden. The last entry is new with the live
-framing outline, which has not shipped yet:
+True of v1.6.1 as released, stated rather than hidden:
 
 - **Folder grouping and bulk rename are not reachable in the UI.** The `documents` table has a
   `folder` column, `DocumentStore.listFolders` can read it and `ScanRepository.moveDocument`
@@ -287,6 +290,10 @@ framing outline, which has not shipped yet:
   bilinearly. On a busy background that can cost the live outline the confidence the still path
   keeps, and it is why the live path declines the detector's fallbacks. Averaging would remove
   the difference and costs a second pass over the plane on every analysed frame.
+- **A border can be drawn outside the screen.** The preview fills the screen by cropping the frame,
+  so when the page reaches the frame's sides — which is what happens when it fills the view — the
+  part of the border tracing those sides is drawn outside the visible area. The outline is still
+  where the page is; on a tall phone it can read as two lines rather than a frame.
 
 ## Licence
 

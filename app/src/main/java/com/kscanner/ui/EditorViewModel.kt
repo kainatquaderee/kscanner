@@ -13,6 +13,7 @@ import com.kscanner.core.imaging.CaptureAdvice
 import com.kscanner.core.imaging.DetectMethod
 import com.kscanner.core.imaging.DocDetector
 import com.kscanner.core.imaging.Filters
+import com.kscanner.core.imaging.PageTurn
 import com.kscanner.core.imaging.Quad
 import com.kscanner.core.imaging.RgbaImage
 import com.kscanner.core.imaging.ScanFilter
@@ -81,8 +82,14 @@ class EditorViewModel(
     var quadNorm by mutableStateOf(Quad.rect(1.0, 1.0))
         private set
 
-    var rotation by mutableStateOf(0)
-        private set
+    /**
+     * The detector's orientation decision and the user's own turns, kept apart so an automatic
+     * pass can revise its half without undoing theirs; [rotation] is the sum of the two.
+     */
+    private var turn by mutableStateOf(PageTurn())
+
+    /** Clockwise rotation of the whole capture, in degrees. */
+    val rotation: Int get() = turn.degrees
 
     var filter by mutableStateOf(settingsStore.defaultFilter)
         private set
@@ -155,7 +162,7 @@ class EditorViewModel(
                 return@launch
             }
             original = decoded
-            rotation = 0
+            turn = PageTurn()
             filter = settingsStore.defaultFilter
             strength = 1f
             brightness = 0f
@@ -173,25 +180,35 @@ class EditorViewModel(
      * Runs the whole automatic preparation on the untouched capture: make it upright, find
      * the outline, measure the residual skew and the frame quality. When [applyStyle] is
      * set the enhancement preset is also chosen from the frame's own measurements.
+     *
+     * The pass re-decides nothing but its own half of [turn]: whatever the user turned by hand
+     * before pressing Detect survives, and the outline is moved with their turn.
      */
     private suspend fun runAutoPass(applyStyle: Boolean) {
         val source = original ?: return
+        // Read before the background hop: the pass is allowed to revise the plan's half of this,
+        // and nothing else about the turn.
+        val inherited = turn
         val prepared = withContext(Dispatchers.Default) {
             val plan = AutoCrop.plan(
                 source,
                 workingEdge = 1080,
                 fixOrientation = settingsStore.current.autoRotate,
             )
-            val rotated = Transforms.rotate(source, plan.rotationDegrees)
+            // AutoCrop states its decision in quarter turns, so it drops straight into the plan's
+            // half; the preview is then rendered in the frame that decision and the user's turn
+            // together produce, which is the frame the outline below is expressed in.
+            val planned = inherited.withPlan(plan.rotationDegrees / 90)
+            val rotated = Transforms.rotate(source, planned.degrees)
             if (applyStyle && settingsStore.current.autoFilter) {
                 // The preset is chosen from the frame's statistics alone, so the cheap copy the
                 // planner already works at is enough and the displayed one is not paid for twice.
                 filter = Filters.auto(Transforms.fitLongestEdge(rotated, 1080))
             }
-            Prepared(plan, Transforms.fitLongestEdge(rotated, CROP_PREVIEW_EDGE))
+            Prepared(planned, plan, Transforms.fitLongestEdge(rotated, CROP_PREVIEW_EDGE))
         }
 
-        rotation = prepared.plan.rotationDegrees
+        turn = prepared.turn
         deskewDegrees = if (settingsStore.current.autoDeskew) prepared.plan.deskewDegrees else 0.0
         detectionMethod = prepared.plan.method
         detectionConfidence = prepared.plan.confidence
@@ -201,9 +218,12 @@ class EditorViewModel(
         // here: the plan's other outline is in full-resolution pixels, and dividing that by the
         // on-screen preview size inflated it by the downscale factor and dragged it off the
         // picture. AutoCrop has already rejected any outline that leaves the frame.
-        val quad = prepared.plan.quadNormalised
-        quadNorm = quad ?: Quad.rect(1.0, 1.0).insetBy(0.025)
-        autoDetected = quad != null
+        //
+        // The plan owns only the frame its rotation produced; the user's turn moved the picture
+        // on from there, so the outline is carried through it as well.
+        val found = prepared.plan.quadNormalised
+        quadNorm = found?.let { prepared.turn.applyTo(it) } ?: Quad.rect(1.0, 1.0).insetBy(0.025)
+        autoDetected = found != null
 
         previewBitmap = withContext(Dispatchers.Default) {
             BitmapBridge.toBitmap(prepared.preview).asImageBitmap()
@@ -211,6 +231,8 @@ class EditorViewModel(
     }
 
     private class Prepared(
+        /** The plan's decision with the user's turn on top; these degrees are the frame below. */
+        val turn: PageTurn,
         val plan: AutoCrop.Plan,
         val preview: RgbaImage,
     )
@@ -226,16 +248,13 @@ class EditorViewModel(
         val currentQuad = quadNorm
         viewModelScope.launch {
             loading = true
-            val nextRotation = if (clockwise) (rotation + 90) % 360 else (rotation + 270) % 360
+            val turns = if (clockwise) 1 else -1
 
             // Rotate the outline with the pixels so it still describes the same physical edge.
-            val movedQuad = if (clockwise) {
-                currentQuad.rotated90Normalized()
-            } else {
-                currentQuad.rotated270Normalized()
-            }
+            // The turn is recorded as the user's own, which is what keeps Detect from reversing it.
+            val movedQuad = currentQuad.rotatedQuarterTurns(turns)
 
-            rotation = nextRotation
+            turn = turn.turnedBy(turns)
             quadNorm = movedQuad
             refreshPreview(detect = false, remeasureSkew = true)
             loading = false

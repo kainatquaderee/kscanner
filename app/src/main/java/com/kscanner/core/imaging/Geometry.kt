@@ -120,8 +120,22 @@ data class Quad(val tl: Pt, val tr: Pt, val br: Pt, val bl: Pt) {
         return Quad(f(bl), f(tl), f(tr), f(br))
     }
 
+    /**
+     * The same physical outline after [turns] clockwise quarter turns, in normalised
+     * coordinates. Negative counts turn the other way, and any count is taken modulo four.
+     *
+     * A caller that composes turns — the detector's orientation decision with the turns the user
+     * made by hand — needs to move the outline by whatever the sum comes to, so the whole family
+     * is reachable through one name instead of a hand-written sequence of quarter turns.
+     */
+    fun rotatedQuarterTurns(turns: Int): Quad {
+        var out = this
+        repeat(((turns % 4) + 4) % 4) { out = out.rotated90Normalized() }
+        return out
+    }
+
     /** Counter-clockwise quarter turn in normalised coordinates. */
-    fun rotated270Normalized(): Quad = rotated90Normalized().rotated90Normalized().rotated90Normalized()
+    fun rotated270Normalized(): Quad = rotatedQuarterTurns(3)
 
     fun containsPoint(p: Pt): Boolean {
         // Convex polygon test: p must be on the same side of every edge.

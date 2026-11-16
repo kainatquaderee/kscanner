@@ -682,6 +682,11 @@ private fun ReviewOverlay(
                 contentScale = ContentScale.Fit,
                 modifier = Modifier
                     .fillMaxSize()
+                    // The strips above and below carry the inset, so they move in by the height
+                    // of the system bars; the page follows them in, or the icons would be drawn
+                    // over the page and a white icon on white paper cannot be seen.
+                    .statusBarsPadding()
+                    .navigationBarsPadding()
                     .padding(vertical = 88.dp),
             )
         } else {
@@ -693,10 +698,14 @@ private fun ReviewOverlay(
             )
         }
 
+        // The review is drawn over the capture screen, so it inherits none of that screen's
+        // insets and must bring its own: the top strip would otherwise be under the clock, and
+        // the bottom strip — where Re-take sits — under the navigation bar, which takes its taps.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .align(Alignment.TopCenter)
+                .statusBarsPadding()
                 .padding(horizontal = 8.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -725,6 +734,7 @@ private fun ReviewOverlay(
             modifier = Modifier
                 .fillMaxWidth()
                 .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
                 .padding(horizontal = 12.dp, vertical = 16.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {

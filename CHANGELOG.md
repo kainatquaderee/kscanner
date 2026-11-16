@@ -8,6 +8,19 @@ Versions before v1.4.0 — v1.0.0 through v1.3.0 — shipped before each release
 repository. Their APKs are on the Releases page; we give no summary of them here rather than an
 invented one.
 
+## v1.6.5 — 2026-11-16
+
+**Fixed**
+
+- **The automatic shutter fires on a page you are holding.** It judged the whole frame, and a page
+  held still and in focus still reads badly as a *frame* — at the resolution the live analyser reads,
+  a page of prose scored 0.0212 against the 0.10 the gate demanded, so it never reached *ready*. The
+  gate now judges the page *inside the outline being followed*, which reads the paper instead of the
+  desk, the room and the preview's own edges, and waits for a stable run of detections rather than of
+  frames. A page on a table too dark for the frame, and a page beside a bright window, read correctly
+  now too.
+- [Full notes](docs/releases/v1.6.5.md)
+
 ## v1.6.4 — 2026-11-16
 
 **Fixed**

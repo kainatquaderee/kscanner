@@ -3,7 +3,10 @@ package com.kscanner.ui.viewer
 import android.content.Intent
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -57,6 +60,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import kotlin.math.abs
 import com.kscanner.data.Page
 import com.kscanner.ui.DocumentViewModel
 import com.kscanner.ui.components.rememberFileImage
@@ -238,6 +242,9 @@ fun ViewerScreen(
     }
 }
 
+/** How far a page may be magnified by pinching. */
+private const val MAX_ZOOM = 5f
+
 /**
  * A page that can be pinched and panned. Zoom resets when the gesture ends below the
  * natural size, which keeps pages from drifting off-screen.
@@ -253,16 +260,35 @@ private fun ZoomablePage(path: String, revision: Any?) {
         modifier = Modifier
             .fillMaxSize()
             .pointerInput(Unit) {
-                detectTransformGestures { _, pan, zoom, _ ->
-                    val next = (scale * zoom).coerceIn(1f, 5f)
-                    scale = next
-                    if (next > 1.01f) {
-                        offsetX += pan.x
-                        offsetY += pan.y
-                    } else {
-                        offsetX = 0f
-                        offsetY = 0f
-                    }
+                // Hand-written rather than detectTransformGestures because that detector consumes
+                // every drag, which starves the pager underneath it: pages could not be swiped at
+                // all. A single finger at natural size is a page turn, so it is left unconsumed;
+                // a pinch, or a pan while zoomed in, belongs to the page and is consumed.
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    var pastSlop = false
+                    do {
+                        val event = awaitPointerEvent()
+                        val zoom = event.calculateZoom()
+                        val pan = event.calculatePan()
+                        if (!pastSlop) {
+                            pastSlop = pan.getDistance() > viewConfiguration.touchSlop ||
+                                abs(1f - zoom) > 0.01f
+                        }
+                        val mine = event.changes.count { it.pressed } > 1 || scale > 1.01f
+                        if (pastSlop && mine) {
+                            val next = (scale * zoom).coerceIn(1f, MAX_ZOOM)
+                            scale = next
+                            if (next > 1.01f) {
+                                offsetX += pan.x
+                                offsetY += pan.y
+                            } else {
+                                offsetX = 0f
+                                offsetY = 0f
+                            }
+                            event.changes.forEach { it.consume() }
+                        }
+                    } while (event.changes.any { it.pressed })
                 }
             },
         contentAlignment = Alignment.Center,

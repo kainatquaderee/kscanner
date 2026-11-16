@@ -38,11 +38,13 @@ algorithms that ship are covered by the unit tests rather than by a device.
 - **Live framing outline**: the viewfinder draws the page border as it is found and dims
   everything outside it, so the shot can be lined up before the shutter is pressed. It is
   always on and has no setting, because it is the affordance rather than a mode. The border is
-  *followed* rather than redrawn: corners move for changes larger than 5 dp, moves are tweened
-  rather than snapped, and a page that goes missing keeps its outline for 400 ms before the pen
-  is lifted — an outline that tracked every frame's noise would shimmer, and one that vanished
-  whenever a line was briefly lost would flicker. Detection is asked for about seven times a
-  second on the same small grayscale frame the automatic shutter measures, and the live path
+  *followed* rather than redrawn: a corner moves once it has shifted by more than 5 dp and holds
+  still for anything less, the move is eased into place over 180 ms, and a page that goes missing
+  keeps its outline for 400 ms before the pen is lifted — an outline that tracked every frame's
+  noise would shimmer, and one that vanished whenever a line was briefly lost would flicker.
+  Detection is asked for ten times a second on the same small grayscale frame the automatic
+  shutter measures, more often than a move takes, so the border glides rather than arriving and
+  resting between detections, and the live path
   uses the line detector alone: the fallbacks exist for still photographs, where an outline
   round a block of text beats nothing, but live that box would read as the page edge
 - Import existing photos from the gallery; each becomes a page and is auto-detected
@@ -86,6 +88,21 @@ algorithms that ship are covered by the unit tests rather than by a device.
 - Strength slider that blends any preset back toward the original
 - Manual brightness, contrast and sharpness adjustments
 - Automatic preset choice from the page's own measurements (colour, exposure, shadow load)
+
+**Reading and correcting a page**
+- Open a page full-screen from the document, swipe left and right between its pages, and
+  recognise the text on it, rotate it a quarter turn, turn it over, or share it
+- **Edit** reopens the page the viewer is *showing* — not the one the document was opened with —
+  in the editor's look stage, with the filter, strength and crop that page was saved with, so
+  what comes up is what is on the page
+- Saving rewrites that page where it is: the same place in the document, the same file, new
+  pixels behind it. A page corrected this way is never appended as a second copy of itself
+- **Apply to all** gives that page's look to every other page in the document. It says how many
+  pages it will touch before it starts, shows progress while it runs, can be stopped between
+  pages, and reports how many were applied and how many could not be. The page being edited is
+  never among them
+- A page carries its look — preset, strength, brightness, contrast, sharpness and deskew angle —
+  so a rotation or a turn keeps all of it instead of dropping back to a plain re-render
 
 **Text and export**
 - On-device OCR with ML Kit — no network, nothing leaves the phone
@@ -223,7 +240,7 @@ layer.
 
 ## Tests
 
-208 unit tests in 22 classes, all runnable on a plain JVM:
+267 unit tests in 28 classes, all runnable on a plain JVM:
 
 ```bash
 ./gradlew :app:testDebugUnitTest
@@ -253,7 +270,15 @@ signature — asserting that an upside-down page is either turned back upright o
 undecided, never left upside down while claiming to have decided. The settings migration that
 turned the old **Batch** mode into a shape plus a toggle is pinned too: every stored value
 decodes to the behaviour it had, and nothing readable decodes to a mode this version cannot
-name. One test writes a real
+name. The look a saved page carries is pinned the same way: `PageLook` checks that every field of
+it reaches the processor, that a stored value outside the slider range is clamped rather than
+passed to the pixel pipeline, that settings read back as the look they were rendered at, and
+that one stored outline lands on the same fraction of two decode sizes. `ApplyLook` decides who
+**Apply to all** is offered to, which pages it touches — every other page is a target and the
+page being edited never is — and every thing it can say, including what a run that was stopped
+part way leaves behind. `PageTurn` composes the turn the detector decided with the turns the
+user asked for, so running Detect again keeps the rotation that was applied by hand instead of
+snapping the page back. One test writes a real
 multi-page PDF to `app/build/verification/` so it can be checked with external tooling:
 
 ```bash
@@ -264,7 +289,7 @@ pdftoppm -png app/build/verification/ocr-sample.pdf page
 
 ## Known issues
 
-True of v1.6.2 as released, stated rather than hidden:
+True of v1.6.3 as released, stated rather than hidden:
 
 - **Folder grouping and bulk rename are not reachable in the UI.** The `documents` table has a
   `folder` column, `DocumentStore.listFolders` can read it and `ScanRepository.moveDocument`
@@ -272,10 +297,6 @@ True of v1.6.2 as released, stated rather than hidden:
   the library never have a folder to show. Rename is offered only when exactly one document is
   selected (`LibraryScreen.kt:510`), so there is no bulk rename. Both are held back for a later
   release rather than half-exposed.
-- **The editor's Detect action discards a manual rotation.** "Detect automatically" re-runs the
-  whole automatic pass, and that pass assigns the rotation it decided
-  (`EditorViewModel.kt:194`), so a quarter turn applied by hand before the tap is replaced by
-  the detector's choice.
 - **Rotating a page does not invalidate stored OCR line boxes.** `ScanRepository.rotateBy`
   rewrites the page image, its corners and its width and height, but leaves `ocr_text` and
   `ocr_lines` untouched — and the boxes are in the pixel coordinates of the image they were

@@ -12,3 +12,10 @@ captures/
 keystore.properties
 *.jks
 *.keystore
+
+# The build's own working notes: the work order for the build in progress, and the PRD, design and
+# survey behind each change. They are written for the build and for the review of it, not for
+# readers of the repository, and they are rewritten every release. What a release changed is said
+# in CHANGELOG.md and docs/releases/, which are the published account of it.
+docs/plan/
+docs/specs/

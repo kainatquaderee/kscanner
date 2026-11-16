@@ -31,6 +31,100 @@ object AutoCrop {
     /** Trimmed from every side of the levelled page, covering the rotation's corner wedges. */
     private const val BORDER_TRIM_FRACTION = 0.02
 
+    /**
+     * Share of the frame the detector's first pass has to account for before its answer is taken as
+     * it stands. Measured across our nineteen fixtures: six rows sit above it and every one of them
+     * is correct to 0.001 of truth, thirteen sit below and ten of those are the fragments this
+     * decision exists to catch; the nearest row below is 0.570, the nearest above 0.672.
+     *
+     * The margin on the low side is thin on purpose. This gate never decides *what* the crop is,
+     * only whether the frame is examined again, and that examination is itself guarded by the rim
+     * test and the ceiling. Set too low it costs the second look on a frame that did not need one;
+     * set too high it leaves a fragment delivered, which is the one outcome a crop must never have.
+     */
+    private const val MIN_PAGE_COVERAGE = 0.60
+
+    /**
+     * Share of the frame's rim that has to read as paper before we conclude the sheet runs past the
+     * view and deliver the frame whole.
+     *
+     * Measured: the two overhangs read 1.00 and 0.88 and the desk-as-bright frame 1.00, and all
+     * three have no page-shaped crop to make; the highest non-fire is 0.40 — the tall sheet, which
+     * overhangs only top and bottom, so the mean dilutes two bright sides with two dark ones — and
+     * the nearest interior frame reads 0.22. That leaves 0.18 below and 0.30 above.
+     *
+     * We take the mean of the four sides rather than their minimum because a minimum answers "is
+     * every side paper", which is true only of the 25 px overhang: the 80 px one reads 0.66 on its
+     * top side, since the sheet's own text margin is narrower than the drawn page's. A count of
+     * three of four agrees with the mean on all nineteen rows and is a step function over the same
+     * four readings, so the mean is the honest form of the same test.
+     */
+    private const val SHEET_PAST_THE_VIEW = 0.70
+
+    /**
+     * Ceiling on what the second look may believe. Un-guarded, it returns 0.997 on a page covering
+     * 0.115 of the frame, and 0.997 on the same fixture is the flat-field turning a lit desk into
+     * paper and the detector finding the frame's own edge. Every genuine page we measured sits
+     * below this and the frame's own edge above it.
+     */
+    private const val WHOLE_FRAME_CEILING = 0.98
+
+    /**
+     * Width of each rim band, in pixels, on the preview the decision runs on. Three pixels around a
+     * 1600x2133 photograph is about 12k samples — enough for the share to be stable and short
+     * enough that the band stays on the very edge, where a sheet that runs past the view leaves
+     * paper and a sheet inside the frame leaves the surface behind it.
+     */
+    private const val RIM_BAND_PIXELS = 3
+
+    /**
+     * Grey levels below the frame's own paper level that a rim pixel may sit and still count as
+     * paper. The fixtures separate paper from a shadowed desk at this offset without letting a
+     * highlight on the desk's gloss into the paper level.
+     */
+    private const val RIM_TOLERANCE = 12
+
+    /**
+     * The brightest share of the frame the paper level is the median of. It has to be the paper's
+     * own level rather than a divider of the frame, because on a light desk the desk is the brighter
+     * of the two: an Otsu-anchored rim test reads 1.00 on the light-desk fixture, where the first
+     * pass is already right, and would deliver the whole frame over a correct crop.
+     */
+    private const val PAPER_LEVEL_SHARE = 0.02
+
+    /** Working edge of the second look. Bounded below the first pass because it is the repair. */
+    private const val SECOND_LOOK_EDGE = 700
+
+    /**
+     * How much the second look has to grow the first pass's answer before it replaces it.
+     *
+     * The two passes resample differently — the first through a resized colour copy, the second
+     * through the resize the gray overload does on the flat-fielded frame — so on a frame where the
+     * page was already found they still disagree by a pixel or two. Across our nineteen fixtures
+     * that disagreement never exceeds 0.0011 of the frame, and on the two rows that reach the second
+     * look without it being a repair it is 0.0002. The repairs themselves grow the answer by 0.054
+     * to 0.349. This floor sits in that gap: nine times above the largest disagreement we measured,
+     * and five times below the smallest repair.
+     *
+     * It is not cosmetic, because everything downstream is derived from the chosen outline: the
+     * flattened page the orientation cue reads, the deskew, the outline that is reported and the
+     * crop itself. Replacing an answer for a gain inside the measurement's own noise re-samples the
+     * page — and a reading taken on the new sampling can land on the far side of its own threshold.
+     * Measured on the photographed upside-down page of prose under uneven light that the orientation
+     * contract test covers: the two passes differ by 0.0005, and adopting on that turns a page the
+     * cue had turned through 180 degrees into one it cannot decide at all.
+     */
+    private const val REPAIR_GAIN_COVERAGE = 0.01
+
+    /** Shortest blur radius the flat-field uses; below this the local background is the paper. */
+    private const val FLATTEN_MIN_RADIUS = 12
+
+    /** Divisor of the frame's longest edge that sets the flat-field's blur radius. */
+    private const val FLATTEN_RADIUS_DIVISOR = 9
+
+    /** Floor on the flat-field's background estimate, so a near-black frame cannot divide by ~0. */
+    private const val FLATTEN_FLOOR_LEVEL = 40
+
     data class Plan(
         /** Clockwise rotation that makes the capture upright, in quarter turns. */
         val rotationDegrees: Int,
@@ -74,14 +168,11 @@ object AutoCrop {
         detectOutline: Boolean = true,
     ): Plan {
         val preview = Transforms.fitLongestEdge(image, workingEdge)
-        val detection = if (detectOutline) {
-            DocDetector.detect(preview, aspectHint = aspectHint)
-        } else {
-            null
-        }
+        val choice = if (detectOutline) decide(preview, aspectHint) else null
+        val chosen = choice?.quad
 
-        val page: GrayImage = if (detection != null) {
-            flatten(preview, detection.quad) ?: preview.toGray()
+        val page: GrayImage = if (chosen != null) {
+            flatten(preview, chosen) ?: preview.toGray()
         } else {
             preview.toGray()
         }
@@ -109,7 +200,7 @@ object AutoCrop {
         //
         // A candidate whose corners leave the frame is a wild guess; keeping it would crop to
         // something the user never pointed at, so drop it and let the caller fall back.
-        val outline: Pair<Quad, Quad>? = detection?.quad?.let { found ->
+        val outline: Pair<Quad, Quad>? = chosen?.let { found ->
             val pixels = rotateQuad(found, preview.width, preview.height, rotation)
             val fractions = pixels.scaled(1.0 / rotatedPreviewWidth, 1.0 / rotatedPreviewHeight)
             if (insideFrame(fractions)) pixels to fractions else null
@@ -125,10 +216,160 @@ object AutoCrop {
             ),
             quadNormalised = outline?.second,
             deskewDegrees = deskew,
-            method = if (outline != null) detection?.method else null,
-            confidence = if (outline != null) max(0.0, detection?.confidence ?: 0.0) else 0.0,
+            method = if (outline != null) choice?.method else null,
+            confidence = if (outline != null) max(0.0, choice?.confidence ?: 0.0) else 0.0,
             quality = Quality.analyse(uprightPage, hasDocument = outline != null),
         )
+    }
+
+    /**
+     * The outline the crop is made from, in pixels of the preview, with the detection it came from
+     * — or nothing, which means the whole capture.
+     */
+    private data class Choice(val quad: Quad?, val method: DetectMethod?, val confidence: Double)
+
+    /**
+     * Which answer the crop is made from, in three steps.
+     *
+     * The detector answers with the largest clean paper-like rectangle it can score, and when the
+     * lighting runs across the page, or the page runs off the frame, that rectangle is a *piece* of
+     * the page: 0.327 for a sheet covering 0.998, 0.287 for the same sheet under a light gradient,
+     * 0.228 where the desk is as bright as the paper. Every wrong answer we measured is too small —
+     * not one of them keeps the desk — so the repair below can only grow an answer, never shrink
+     * one, and leaving page content out stays impossible.
+     *
+     * 1. The first pass, as it always was. An answer covering at least [MIN_PAGE_COVERAGE] of the
+     *    frame is taken and nothing else runs.
+     * 2. The rim test: does the paper reach the frame's own edge? If it does, the sheet runs past
+     *    the view and there is no page-shaped crop to make, so we answer with nothing and the whole
+     *    capture is delivered. This runs *before* the second look, because a frame whose paper
+     *    reaches its edges has no page-shaped answer to find whatever the flat-field produces.
+     * 3. The second look: a flat-fielded copy of the frame, detected again. Its answer is adopted
+     *    only when it grows the first one by more than [REPAIR_GAIN_COVERAGE] and stays below
+     *    [WHOLE_FRAME_CEILING] — a repair, not a replacement. A first pass that found nothing has no
+     *    answer to compare against, so it takes the second look only when that clears the same
+     *    [MIN_PAGE_COVERAGE] gate, since a fragment is what we are guarding against either way.
+     *
+     * Both passes answer in the preview's own pixels, which is what makes them comparable: measuring
+     * one frame's outline against another's would silently inflate it by the ratio of the two.
+     */
+    private fun decide(preview: RgbaImage, aspectHint: Double?): Choice {
+        val first = DocDetector.detect(preview, aspectHint = aspectHint)
+        val firstCoverage = coverageOf(first?.quad, preview.width, preview.height)
+        if (first != null && firstCoverage >= MIN_PAGE_COVERAGE) {
+            return Choice(first.quad, first.method, first.confidence)
+        }
+
+        val gray = preview.toGray()
+        if (sheetPastTheView(gray)) return Choice(null, null, 0.0)
+
+        // The flat-field makes paper and lit desk alike, which is what lets the second look find a
+        // page edge the first pass lost to a gradient — and is also why it needs a ceiling.
+        val flat = Threshold.normalizeIllumination(
+            gray,
+            radius = max(FLATTEN_MIN_RADIUS, max(gray.width, gray.height) / FLATTEN_RADIUS_DIVISOR),
+            floorLevel = FLATTEN_FLOOR_LEVEL,
+        )
+        val second = DocDetector.detect(flat, workingEdge = SECOND_LOOK_EDGE)
+        val secondCoverage = coverageOf(second?.quad, preview.width, preview.height)
+
+        val adopt = if (first == null) {
+            secondCoverage >= MIN_PAGE_COVERAGE
+        } else {
+            secondCoverage - firstCoverage > REPAIR_GAIN_COVERAGE &&
+                secondCoverage < WHOLE_FRAME_CEILING
+        }
+        if (adopt && second != null) return Choice(second.quad, second.method, second.confidence)
+
+        return if (first != null) {
+            Choice(first.quad, first.method, first.confidence)
+        } else {
+            Choice(null, null, 0.0)
+        }
+    }
+
+    /** Share of the frame an outline accounts for once it is clamped to the frame's bounds. */
+    private fun coverageOf(quad: Quad?, width: Int, height: Int): Double {
+        if (quad == null) return 0.0
+        return quad.clampTo(width, height).area() / (width.toDouble() * height)
+    }
+
+    /**
+     * Whether the paper reaches the frame's own edge, which means the sheet runs past the view.
+     *
+     * The test is a property of the *frame*, not of the detection: the frames that defeat the
+     * detector are not the frames where it is unsure — it reports its fragment confidently — they
+     * are the frames where the paper continues to the edge of what the camera saw.
+     *
+     * It is deliberately a *relative* test: the level is read from the frame's own brightest
+     * [PAPER_LEVEL_SHARE], so the absolute exposure of the photograph drops out. That is what makes
+     * it work on a dark desk and fail on a desk as bright as the paper, where the two are simply
+     * the same level. The mean of the four sides is what fires: see [SHEET_PAST_THE_VIEW].
+     */
+    private fun sheetPastTheView(gray: GrayImage): Boolean {
+        val threshold = paperLevel(gray) - RIM_TOLERANCE
+        val band = minOf(RIM_BAND_PIXELS, gray.width, gray.height)
+
+        val top = rowShare(gray, 0, band, threshold)
+        val bottom = rowShare(gray, gray.height - band, gray.height, threshold)
+        val left = columnShare(gray, 0, band, threshold)
+        val right = columnShare(gray, gray.width - band, gray.width, threshold)
+
+        return (top + bottom + left + right) / 4.0 >= SHEET_PAST_THE_VIEW
+    }
+
+    /**
+     * The frame's paper level: the midpoint of the brightest [PAPER_LEVEL_SHARE] of its histogram.
+     *
+     * Walking down from white, [first] is the brightest level the frame uses at all — the few pixels
+     * of a highlight or the top of the paper's own range — and [last] is where the cumulative count
+     * reaches the share; the level we report is between them, so a single clipped highlight cannot
+     * set the level on its own.
+     */
+    private fun paperLevel(gray: GrayImage): Int {
+        val histogram = IntArray(256)
+        for (v in gray.data) histogram[v.coerceIn(0, 255)]++
+
+        val target = (gray.size * PAPER_LEVEL_SHARE).toInt().coerceAtLeast(1)
+        var first = -1
+        var last = -1
+        var cumulative = 0
+        for (level in 255 downTo 0) {
+            val count = histogram[level]
+            if (count == 0) continue
+            if (first < 0) first = level
+            cumulative += count
+            if (last < 0 && cumulative >= target) last = level
+        }
+        return (first + last) / 2
+    }
+
+    /** Share of the rows in `[from, to)` whose pixels are at least [threshold]. */
+    private fun rowShare(gray: GrayImage, from: Int, to: Int, threshold: Int): Double {
+        var paper = 0
+        var total = 0
+        for (y in from until to) {
+            val row = y * gray.width
+            for (x in 0 until gray.width) {
+                if (gray.data[row + x] >= threshold) paper++
+                total++
+            }
+        }
+        return paper.toDouble() / total
+    }
+
+    /** Share of the columns in `[from, to)` whose pixels are at least [threshold]. */
+    private fun columnShare(gray: GrayImage, from: Int, to: Int, threshold: Int): Double {
+        var paper = 0
+        var total = 0
+        for (y in 0 until gray.height) {
+            val row = y * gray.width
+            for (x in from until to) {
+                if (gray.data[row + x] >= threshold) paper++
+                total++
+            }
+        }
+        return paper.toDouble() / total
     }
 
     /**

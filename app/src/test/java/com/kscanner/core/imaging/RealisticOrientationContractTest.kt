@@ -20,7 +20,7 @@ import org.junit.Test
  * [AutoCrop] calls `Orientation.estimate(level(page))` either way — without dragging the line
  * detector's own error into an assertion that is about orientation. No emulator, no device, no
  * camera: the lighting below is a model of a lamp and a shadow, applied by arithmetic in
- * [RealisticPages], and that limit is stated in the report.
+ * [RealisticPages], and that is the limit of what these fixtures can prove.
  *
  * ## What the cue is held to, and why it is no longer "every page is turned back"
  *
@@ -38,7 +38,7 @@ import org.junit.Test
  * 7 prose fixtures decided at 520, 780 and 1040 and 0 of 7 at 1300, with a different four each time
  * (at 780 it is the prose and the stamped page that decide and the uneven-light and shadowed pages
  * that stop; at 1040 the stamped page misses the margin by 0.0002). Two clauses above are quoted
- * from the developer's measurement rather than reproduced here: the band *count* behind the majority
+ * from the measurement they came from rather than reproduced here: the band *count* behind the majority
  * gate, which is not observable from the public API, and the 3.8x lighting ratio, which this run
  * did not reproduce (on these fixtures a lighting change moves the cue between "no reading at all"
  * and a reading, which is a larger effect than a ratio).
@@ -136,7 +136,7 @@ class RealisticOrientationContractTest {
      * "silently" wrong *at this seam*; what it could not do was turn five of them back. So this
      * helper pins the necessary condition for the product's promise (the engine never claims a
      * decision it did not make), while the sufficient condition — that the flag actually reaches
-     * the review as a tappable chip — is AC-8 and is not testable here. The regression evidence for
+     * the review as a tappable chip — is not testable here. The regression evidence for
      * the fix lives in [assertUpsideDownPageIsCorrected] and in
      * `the flip cue decides where it has evidence and reports abstention where it does not`.
      */
@@ -304,8 +304,7 @@ class RealisticOrientationContractTest {
 
         // The other half of the same promise, and the guard against an engine that abstains on
         // everything: ink with no 0-versus-180 reading at all must be declined rather than guessed
-        // at. This is AC-14's requirement, and it is where a decline is mandatory rather than
-        // merely permitted.
+        // at. It is where a decline is mandatory rather than merely permitted.
         for ((what, page) in listOf(
             "a boxed table" to RealisticPages.tablePage(),
             "a solid block" to RealisticPages.solidBlockPage(),
@@ -370,7 +369,7 @@ class RealisticOrientationContractTest {
         val plan = plan(RealisticPages.solidBlockPage())
         // There is no print to read here at all, so the flip must not claim to have decided. Its
         // quarter turn is not asserted: a square block is unchanged by one, so that reading is not a
-        // defect on this fixture. Recorded in the report.
+        // defect on this fixture.
         assertFalse("a solid block offers no evidence to decide a flip", plan.flipDecided)
     }
 

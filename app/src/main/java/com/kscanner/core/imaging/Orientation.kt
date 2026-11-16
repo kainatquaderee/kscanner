@@ -283,11 +283,11 @@ object Orientation {
             standardErrorOf(asCaptured) * standardErrorOf(asCaptured) +
                 standardErrorOf(turned) * standardErrorOf(turned),
         )
-        // KILL CRITERION APPLIED (§2.1): the noise guard is deleted and [bandMargin] alone
-        // decides. Measured on the tester's prose fixture, the gap the cue produces is 0.0189
-        // against a guard of 0.0244, so the guard re-created the false negative it was meant to
-        // bound — the exact regression §2.1 says must not ship. [standardError] is still
-        // reported so a caller (and the tests) can see the scatter the margin no longer uses.
+        // The noise guard that was tried here is deleted, and [bandMargin] alone decides: measured
+        // on the prose fixture it was calibrated against, the gap the cue produces is 0.0189 against
+        // a guard of 0.0244, so the guard re-created the false negative it was meant to bound.
+        // [standardError] is still reported so a caller (and the tests) can see the scatter the
+        // margin no longer uses.
         val margin = bandMargin
         val decided = abs(gap) > margin
         val flip = decided && gap > margin

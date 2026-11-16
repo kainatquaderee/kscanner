@@ -77,7 +77,7 @@ class OrientationDecisionTest {
     /**
      * The other no-evidence shape: neither candidate has a reading at all. The two-signal rule plus
      * this one are the whole of AC-13 at the pure-function level — an absent reading can never be
-     * counted as a reading of 0.0, which is hypothesis H2 in the PRD, refuted here.
+     * counted as a reading of 0.0, which is refuted here.
      */
     @Test
     fun `two candidates that both abstain decide nothing`() {

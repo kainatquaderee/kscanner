@@ -4,10 +4,10 @@ An Android document scanner: photograph a page, have its edges found automatical
 the crop to a true rectangle, clean up the look, stack pages into a document, recognise the
 text on-device, and export a searchable PDF.
 
-Written from scratch in Kotlin and Jetpack Compose. The imaging engine, the PDF writer and
+We wrote it from scratch in Kotlin and Jetpack Compose. The imaging engine, the PDF writer and
 the OCR text codec are plain JVM code: a single file, `BitmapBridge`, touches
-`android.graphics` to decode and encode, and everything else runs without Android, so the
-algorithms that ship are covered by the unit tests rather than by a device.
+`android.graphics` to decode and encode, and everything else runs without Android, so we cover
+the algorithms that ship with the unit tests rather than with a device.
 
 ## Features
 
@@ -32,7 +32,7 @@ algorithms that ship are covered by the unit tests rather than by a device.
   one page, so it appears for Single with Batch on, and not for a spread or a card.
 - Optional **automatic shutter**: the camera measures each preview frame and fires when the
   page is sharp, evenly lit and has stayed that way for several frames (a filling ring shows
-  the wait). It is deliberately unhurried so it does not fire at a half-settled hand.
+  the wait). We keep it deliberately unhurried, so it does not fire at a half-settled hand.
 - Live capture advice — "Hold still", "Glare on the page", "Even out the light" — driven by
   the same measurements the pipeline uses, instead of a silent bad scan
 - **Live framing outline**: the viewfinder draws the page border as it is found and dims
@@ -66,7 +66,7 @@ algorithms that ship are covered by the unit tests rather than by a device.
   rows that carry the cue sit inside the band instead of being cut away by a fixed threshold —
   which is why a page that arrives upside down is turned back upright in far more cases than
   it used to be
-- That cue has a limit, and the app reports it rather than guessing. On dense prose with
+- That cue has a limit, and we report it rather than guess. On dense prose with
   little typographic asymmetry the reading sits too close to its own scatter to trust, at
   every affordable working resolution, and no threshold fixes that: a page in that state is
   left as captured, `AutoCrop.Plan.flipDecided` is false, `AutoCrop.Plan.flipReason` records
@@ -233,10 +233,9 @@ ui              Compose screens (library, camera, editor, document, viewer, sett
   capture       ScanSessionViewModel: drives the runs that keep the camera open
 ```
 
-`ScanProcessor` is deliberately a pure function over pixel buffers. That is what lets the
-crop and filter stages be tested on the JVM without an emulator, and it is why the PDF
-writer is hand-rolled: `android.graphics.pdf.PdfDocument` cannot express an invisible text
-layer.
+We keep `ScanProcessor` deliberately a pure function over pixel buffers. That is what lets us
+test the crop and filter stages on the JVM without an emulator, and it is why we hand-rolled
+the PDF writer: `android.graphics.pdf.PdfDocument` cannot express an invisible text layer.
 
 ## Tests
 
@@ -289,14 +288,14 @@ pdftoppm -png app/build/verification/ocr-sample.pdf page
 
 ## Known issues
 
-True of v1.6.3 as released, stated rather than hidden:
+True of v1.6.4 as released. We state these rather than hide them:
 
 - **Folder grouping and bulk rename are not reachable in the UI.** The `documents` table has a
   `folder` column, `DocumentStore.listFolders` can read it and `ScanRepository.moveDocument`
   can set one, but nothing in the interface ever calls `moveDocument`, so the folder chips in
   the library never have a folder to show. Rename is offered only when exactly one document is
-  selected (`LibraryScreen.kt:510`), so there is no bulk rename. Both are held back for a later
-  release rather than half-exposed.
+  selected (`LibraryScreen.kt:510`), so there is no bulk rename. We hold both back for a later
+  release rather than half-expose them.
 - **Rotating a page does not invalidate stored OCR line boxes.** `ScanRepository.rotateBy`
   rewrites the page image, its corners and its width and height, but leaves `ocr_text` and
   `ocr_lines` untouched — and the boxes are in the pixel coordinates of the image they were

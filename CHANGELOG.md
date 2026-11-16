@@ -5,8 +5,17 @@ release live in [`docs/releases/`](docs/releases/) and are published with the AP
 [Releases page](https://github.com/[CUSTOM_REDACTED]/kscanner/releases).
 
 Versions before v1.4.0 — v1.0.0 through v1.3.0 — shipped before each release kept notes in the
-repository. Their APKs are on the Releases page; no summary of them is given here rather than an
+repository. Their APKs are on the Releases page; we give no summary of them here rather than an
 invented one.
+
+## v1.6.4 — 2026-11-16
+
+**Fixed**
+
+- The batch review's **Close** and **Re-take** buttons sat inside the status bar and the navigation
+  bar, so the system could answer a tap meant for them. Both strips now take the same insets the
+  camera screen uses, and the page image moves in with them so nothing is drawn under the bars.
+- [Full notes](docs/releases/v1.6.4.md)
 
 ## v1.6.3 — 2026-11-16
 

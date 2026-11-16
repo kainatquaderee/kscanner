@@ -9,6 +9,67 @@ class ScanModesTest {
 
     // ------------------------------------------------------------------ book spread
 
+    /** [src] repeated to fill a band of [width] and [height], so a page can be any size needed. */
+    private fun tiled(src: GrayImage, width: Int, height: Int): GrayImage {
+        val out = GrayImage(width, height, IntArray(width * height))
+        for (y in 0 until height) {
+            for (x in 0 until width) out.set(x, y, src.get(x % src.width, y % src.height))
+        }
+        return out
+    }
+
+    /**
+     * A spread laid out the way a flattened capture of one is: two pages of real content side by
+     * side, joined by a gutter of [gutter] pixels centred at [fraction] of the width.
+     */
+    private fun spreadOf(
+        src: GrayImage,
+        width: Int,
+        height: Int,
+        fraction: Double,
+        gutter: Int,
+        level: Int,
+    ): GrayImage {
+        val centre = (width * fraction).toInt()
+        val leftWidth = centre - gutter / 2
+        val left = tiled(src, leftWidth, height)
+        val right = tiled(src, width - centre - gutter / 2, height)
+        val out = GrayImage(width, height, IntArray(width * height))
+        for (y in 0 until height) {
+            for (x in 0 until width) {
+                val v = when {
+                    x < leftWidth -> left.get(x, y)
+                    x < centre + gutter / 2 -> level
+                    else -> right.get(x - centre - gutter / 2, y)
+                }
+                out.set(x, y, v)
+            }
+        }
+        return out
+    }
+
+    /**
+     * A narrow column of dense print down the middle of an otherwise ordinary page: a single page
+     * whose centre column is dark, which is the case the replaced single-column test accepted.
+     */
+    private fun narrowPrintColumn(src: GrayImage, columnWidth: Int): GrayImage {
+        val out = src.copy()
+        val scale = 2
+        val pitch = RealisticPages.cellHeight(scale) + 2 * scale
+        val chars = (columnWidth - 8) / RealisticPages.advance(scale)
+        RealisticPages.drawParagraph(
+            out,
+            chars,
+            src.height / pitch - 2,
+            (src.width - columnWidth) / 2,
+            40,
+            scale,
+            RealisticPages.INK,
+            pitch,
+        )
+        return out
+    }
+
     @Test
     fun `splitting a spread keeps the outer edges and covers the whole area`() {
         val quad = Quad(
@@ -30,21 +91,92 @@ class ScanModesTest {
     }
 
     @Test
-    fun `the gutter is found off centre`() {
+    fun `a creased sheet reads as a spread, and the seam is off centre`() {
         val image = TestImages.spreadWithGutter(width = 400, height = 300, seamFraction = 0.62)
             .toGray()
 
-        val seam = Spread.findSeam(image)
+        val verdict = Spread.decide(image)
 
-        assertTrue("seam was $seam", Math.abs(seam - 0.62) < 0.06)
-        assertTrue("a creased sheet reads as a spread", Spread.looksLikeSpread(image))
+        assertTrue("a creased sheet reads as a spread", verdict.isSpread)
+        assertTrue("seam was ${verdict.seam}", Math.abs(verdict.seam - 0.62) < 0.06)
+        assertEquals("the seam is the one findSeam found", Spread.findSeam(image), verdict.seam, 1e-9)
     }
 
     @Test
     fun `flat paper is not mistaken for a spread`() {
         val flat = TestImages.solid(400, 300, 0xFFF0F0F0.toInt()).toGray()
 
-        assertTrue("no gutter, no spread", !Spread.looksLikeSpread(flat))
+        assertTrue("no gutter, no spread", !Spread.decide(flat).isSpread)
+    }
+
+    @Test
+    fun `a shot too small to measure is one page, not a guess`() {
+        val verdict = Spread.decide(TestImages.solid(20, 20, 0xFFF0F0F0.toInt()).toGray())
+
+        assertTrue("nothing was measured", !verdict.isSpread)
+        assertEquals("and the middle is left alone", 0.5, verdict.seam, 1e-9)
+    }
+
+    @Test
+    fun `a page of print is one page, however dark its columns are`() {
+        val print = TestImages.textPage().toGray()
+        val prose = RealisticPages.prosePage()
+
+        assertTrue("a page of lines of print", !Spread.decide(print).isSpread)
+        assertTrue("a page of prose", !Spread.decide(prose).isSpread)
+    }
+
+    @Test
+    fun `a narrow column of print down the middle is one page`() {
+        // Narrow enough to pass the width and depth tests, which is why the full-height test
+        // exists: print leaves paper between its lines, and a crease does not.
+        val page = narrowPrintColumn(RealisticPages.page(1800, 1200), 144)
+
+        val verdict = Spread.decide(page)
+
+        assertTrue("a text column is not a gutter", !verdict.isSpread)
+    }
+
+    @Test
+    fun `a page with ink across its middle is one page`() {
+        val block = RealisticPages.solidBlockPage()
+
+        assertTrue("a solid block is not a crease", !Spread.decide(block).isSpread)
+    }
+
+    @Test
+    fun `a shadow over part of a page is one page`() {
+        val uneven = RealisticPages.prosePageUnderUnevenLight()
+        val lowHalf = RealisticPages.prosePageShadowedLowHalf()
+
+        assertTrue("uneven light", !Spread.decide(uneven).isSpread)
+        assertTrue("a shadow across the lower half", !Spread.decide(lowHalf).isSpread)
+    }
+
+    @Test
+    fun `a brightly lit gutter is still a gutter`() {
+        // Twelve grey levels deep: what a crease looks like when the lamp is on it, and shallower
+        // than the sixteen the replaced test demanded.
+        val image = TestImages.spreadWithGutter(width = 400, height = 300, crease = 0xFFE6E6E6.toInt())
+            .toGray()
+
+        assertTrue("a shallow crease is still a crease", Spread.decide(image).isSpread)
+    }
+
+    @Test
+    fun `a spread is decided at both ends of the range a gutter can sit in`() {
+        for (fraction in listOf(0.30, 0.70)) {
+            val image = spreadOf(RealisticPages.prosePage(), 1800, 1200, fraction, gutter = 40, level = 0x60)
+
+            val verdict = Spread.decide(image)
+
+            assertTrue("gutter at $fraction decided $verdict", verdict.isSpread)
+            assertTrue(
+                "cut at ${verdict.seam}, gutter at $fraction",
+                Math.abs(verdict.seam - fraction) <= 0.05,
+            )
+            assertTrue("seam left the search range", verdict.seam >= 0.30 && verdict.seam <= 0.70)
+        }
     }
 
     // ------------------------------------------------------------------ id card

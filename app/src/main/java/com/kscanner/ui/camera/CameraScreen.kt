@@ -346,6 +346,12 @@ fun CameraScreen(
         // The outline the detector is following, drawn where the preview actually put the frame.
         FramingOverlay(outline, Modifier.fillMaxSize())
 
+        // Book mode cuts at the gutter, so the gutter has to be alignable before the shot. Only in
+        // Book mode, and under the controls: the line is a reference, not a control.
+        if (session.mode == ScanMode.BOOK) {
+            BookGuide(Modifier.fillMaxSize())
+        }
+
         if (showGrid) {
             Canvas(Modifier.fillMaxSize()) {
                 val stroke = Stroke(width = 1.2f)

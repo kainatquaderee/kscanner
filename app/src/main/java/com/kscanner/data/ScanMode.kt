@@ -16,7 +16,7 @@ enum class ScanMode(
     val hint: String,
 ) {
     SINGLE("Single", "Crop and enhance one shot"),
-    BOOK("Book", "One spread becomes two pages"),
+    BOOK("Book", "Spreads split in two, single pages stay whole"),
     ID_CARD("ID Card", "Front and back on one sheet"),
 
     ;
@@ -27,6 +27,11 @@ enum class ScanMode(
     /**
      * True when one shot yields exactly one page, and so a page can be replaced by a single
      * re-shoot. False for a spread (one shot, two pages) and a card (two shots, one page).
+     *
+     * [BOOK] is false although a shot of a single page does land as one page: whether a given
+     * shot becomes one page or two is decided from the shot itself, so the re-take affordance
+     * cannot know before the shot is taken, and an affordance that is sometimes wrong is worse
+     * than one that is absent.
      */
     val isOnePagePerShot: Boolean get() = this == SINGLE
 

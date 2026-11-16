@@ -239,8 +239,8 @@ class ScanSessionViewModel(
             }
 
             ScanMode.BOOK -> {
-                val halves = withContext(Dispatchers.Default) { measured.spreadPages() }
-                commit(halves)
+                val pages = withContext(Dispatchers.Default) { measured.spreadPages() }
+                commit(pages)
             }
 
             ScanMode.ID_CARD -> {
@@ -340,8 +340,14 @@ class ScanSessionViewModel(
         }
 
         /**
-         * Cuts a spread into two pages. The gutter is found on the flattened spread, so the
-         * cut follows where the book actually folds rather than the geometric middle.
+         * Renders a Book-mode shot: two pages when the shot really is a spread, one page when it
+         * is not.
+         *
+         * The decision comes from the gutter found on the flattened shot, because cutting every
+         * shot in two turned a photograph of one page into two half-pages that nothing in the app
+         * can rejoin. A shot decided to be one page is rendered exactly as a single shot is, and
+         * keeps its whole width; a spread keeps the existing per-half homography, cut where the
+         * book actually folds rather than down the middle.
          */
         fun spreadPages(): List<ScanRepository.RenderedPage> {
             val rotated = Transforms.rotate(source, base.rotationDegrees)
@@ -353,8 +359,13 @@ class ScanSessionViewModel(
             val flattened = runCatching {
                 Homography.warpPerspective(rotated, spread.clampTo(rotated.width, rotated.height), 900)
             }.getOrNull()
-            val seam = flattened?.let { Spread.findSeam(it.toGray()) } ?: 0.5
-            val split = Spread.split(spread, seam)
+            // A shot the pipeline could not flatten has no evidence either way, and the same
+            // default applies: a whole page is what the user can see and re-shoot, two halves
+            // are not.
+            val verdict = flattened?.let { Spread.decide(it.toGray()) }
+            if (verdict == null || !verdict.isSpread) return listOf(singlePage(null))
+
+            val split = Spread.split(spread, verdict.seam)
 
             return listOf(split.left, split.right).map { half ->
                 val rendered = ScanProcessor.process(source, base.copy(quad = half))

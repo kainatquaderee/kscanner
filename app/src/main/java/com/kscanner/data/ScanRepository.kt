@@ -7,11 +7,14 @@ import android.net.Uri
 import androidx.core.content.FileProvider
 import com.kscanner.core.imaging.BitmapBridge
 import com.kscanner.core.imaging.Corners
+import com.kscanner.core.imaging.PageLook
 import com.kscanner.core.imaging.Quad
 import com.kscanner.core.imaging.RgbaImage
 import com.kscanner.core.imaging.ScanFilter
 import com.kscanner.core.imaging.ScanProcessor
 import com.kscanner.core.imaging.Transforms
+import com.kscanner.core.imaging.inFrame
+import com.kscanner.core.imaging.toLook
 import com.kscanner.core.ocr.OcrEngine
 import com.kscanner.core.ocr.OcrText
 import com.kscanner.core.pdf.PdfExporter
@@ -73,7 +76,14 @@ class ScanRepository(
         val originalPath: String?,
         val quad: Quad?,
         val rotation: Int,
-        val filterId: Int,
+        /**
+         * The preset and adjustments the pixels were rendered with. Stored beside them, so a
+         * later re-render of the same page — a rotation, a filter change, "apply to all" — can
+         * reproduce the look instead of silently dropping it.
+         */
+        val look: PageLook,
+        /** Residual text skew baked into the render, in degrees (clockwise positive). */
+        val deskewDegrees: Double = 0.0,
         /**
          * Whether the automatic pass could decide the page's 0-versus-180 flip; null when no
          * plan ran. Stored so the review can offer a one-tap flip on the pages it could not
@@ -136,12 +146,14 @@ class ScanRepository(
                         index = index,
                         originalPath = (originalFile ?: pageFile).absolutePath,
                         processedPath = pageFile.absolutePath,
-                        filterId = page.filterId,
+                        filterId = page.look.filter.id,
                         rotation = page.rotation,
                         corners = page.quad?.let { Corners.serialize(it) },
                         width = page.image.width,
                         height = page.image.height,
                         flipDecided = page.flipDecided,
+                        look = page.look,
+                        deskewDegrees = page.deskewDegrees,
                     )
                 },
             )
@@ -181,7 +193,8 @@ class ScanRepository(
                     originalPath = capturePath,
                     quad = scan.quad,
                     rotation = scan.rotationDegrees,
-                    filterId = scan.filter.id,
+                    look = scan.toLook(),
+                    deskewDegrees = scan.deskewDegrees,
                 ),
             ),
             documentName = documentName,
@@ -251,55 +264,238 @@ class ScanRepository(
 
     // ---------------------------------------------------------------- pages
 
+    /**
+     * Re-renders one page from its original with [filter] and the given adjustments.
+     *
+     * Kept for callers that only have a preset and sliders; the page's own geometry, skew and
+     * preset strength come from the row, so nothing the user did is dropped on the way through.
+     */
     suspend fun reprocessPage(
         pageId: Long,
         filter: Int,
         brightness: Float = 0f,
         contrast: Float = 0f,
         sharpness: Float = 0f,
+        strength: Float? = null,
     ): Boolean = withContext(Dispatchers.Default) {
         val found = withContext(Dispatchers.IO) { store.getPage(pageId) } ?: return@withContext false
         val page = ensureReprocessableOriginal(found) ?: return@withContext false
-        val source = BitmapBridge.decodeFile(File(page.originalPath), settings.current.maxImageEdge)
-            ?: return@withContext false
+        val source = decodeOriginal(page) ?: return@withContext false
 
-        val scan = ScanProcessor.Settings(
-            quad = Corners.parse(page.corners),
-            rotationDegrees = page.rotation,
+        val look = PageLook(
             filter = ScanFilter.fromId(filter),
+            strength = strength ?: found.look.strength,
             brightness = brightness,
             contrast = contrast,
             sharpness = sharpness,
-            maxOutputEdge = settings.current.maxImageEdge,
         )
-        val rendered = ScanProcessor.process(source, scan)
-        val destination = File(page.processedPath)
-        if (!BitmapBridge.saveJpeg(rendered, destination, settings.current.jpegQuality)) {
+        val rendered = renderLook(
+            source = source,
+            look = look,
+            outlineNorm = storedOutline(page, source, page.rotation),
+            rotationDegrees = page.rotation,
+            deskewDegrees = page.deskewDegrees,
+        )
+        if (!writePage(page, look, rendered, page.rotation, page.deskewDegrees)) {
             return@withContext false
         }
-        withContext(Dispatchers.IO) {
-            store.updatePageResult(
-                pageId = pageId,
-                processedPath = destination.absolutePath,
-                filterId = scan.filter.id,
-                rotation = scan.rotationDegrees,
-                corners = page.corners,
-                width = rendered.width,
-                height = rendered.height,
-            )
-            refreshThumbnail(page.documentId)
-        }
+        withContext(Dispatchers.IO) { refreshThumbnail(page.documentId) }
         true
     }
 
     /**
+     * Applies the editor's result to an existing page, in place.
+     *
+     * The page keeps its row, its position and its file: only the bytes behind `processed_path`
+     * change, along with the geometry and the look that produced them. Appending a new page here
+     * would turn "edit page 3" into "another page 3", which is the defect this exists to avoid.
+     *
+     * [outlineNorm] is in fractions of the rotated source, not pixels: the editor previews the
+     * page on a smaller copy than the original is decoded at, and a pixel outline carried between
+     * the two frames lands the crop somewhere else entirely.
+     *
+     * @return true when the render was written and the row now points at it
+     */
+    suspend fun updatePage(
+        pageId: Long,
+        outlineNorm: Quad,
+        rotationDegrees: Int,
+        deskewDegrees: Double,
+        look: PageLook,
+    ): Boolean = withContext(Dispatchers.Default) {
+        val found = withContext(Dispatchers.IO) { store.getPage(pageId) } ?: return@withContext false
+        val page = ensureReprocessableOriginal(found) ?: return@withContext false
+        val source = decodeOriginal(page) ?: return@withContext false
+
+        val rendered = renderLook(source, look, outlineNorm, rotationDegrees, deskewDegrees)
+        if (!writePage(page, look, rendered, rotationDegrees, deskewDegrees)) {
+            return@withContext false
+        }
+        withContext(Dispatchers.IO) { refreshThumbnail(page.documentId) }
+        true
+    }
+
+    /** What "apply to all" achieved: how many pages took the look, and how many did not. */
+    class ApplyResult(val applied: Int, val failed: Int, val cancelled: Boolean)
+
+    /**
+     * Copies [look] onto [pageIds], one page at a time.
+     *
+     * Only the look travels. Each page keeps its own outline, rotation and skew, because those
+     * describe a frame the other pages do not share: pasting page 3's crop onto page 7 would cut
+     * the wrong part of a different photograph.
+     *
+     * [onProgress] is called before each page with the page's number within the document and the
+     * document's page count, and [cancelled] is polled between pages so a long run can be stopped.
+     * Stopping is not a rollback: the pages already rewritten stay rewritten, which is why the
+     * caller reports the counts rather than claiming the document is untouched.
+     */
+    suspend fun applyLookToPages(
+        documentId: Long,
+        pageIds: List<Long>,
+        look: PageLook,
+        onProgress: (pageNumber: Int, total: Int) -> Unit = { _, _ -> },
+        cancelled: () -> Boolean = { false },
+    ): ApplyResult = withContext(Dispatchers.Default) {
+        val pages = withContext(Dispatchers.IO) { store.getPages(documentId) }
+        val total = pages.size
+
+        var applied = 0
+        var failed = 0
+        var stopped = false
+        for (pageId in pageIds) {
+            if (cancelled()) {
+                stopped = true
+                break
+            }
+            val page = pages.firstOrNull { it.id == pageId }
+            if (page == null) {
+                failed++
+                continue
+            }
+            onProgress(page.index + 1, total)
+            val ok = runCatching { reapplyLook(page, look) }.getOrDefault(false)
+            if (ok) applied++ else failed++
+        }
+
+        // One thumbnail for the whole run: it only ever shows the first page, and regenerating it
+        // per page would decode and re-encode that page's neighbours for nothing.
+        if (applied > 0) withContext(Dispatchers.IO) { refreshThumbnail(documentId) }
+        ApplyResult(applied, failed, stopped)
+    }
+
+    /**
+     * Re-renders [page] with a new look, keeping its geometry.
+     *
+     * The page is re-frozen first: a page whose original *is* its processed file would otherwise
+     * have the new look laid on top of the old one, and the next look on top of that.
+     */
+    private suspend fun reapplyLook(page: Page, look: PageLook): Boolean {
+        val reprocessable = ensureReprocessableOriginal(page) ?: return false
+        val source = decodeOriginal(reprocessable) ?: return false
+        val rendered = renderLook(
+            source = source,
+            look = look,
+            outlineNorm = storedOutline(reprocessable, source, reprocessable.rotation),
+            rotationDegrees = reprocessable.rotation,
+            deskewDegrees = reprocessable.deskewDegrees,
+        )
+        return writePage(
+            page = reprocessable,
+            look = look,
+            rendered = rendered,
+            rotationDegrees = reprocessable.rotation,
+            deskewDegrees = reprocessable.deskewDegrees,
+        )
+    }
+
+    private suspend fun decodeOriginal(page: Page): RgbaImage? =
+        BitmapBridge.decodeFile(File(page.originalPath), settings.current.maxImageEdge)
+
+    /** A page re-rendered from its original, with the outline that was actually used for it. */
+    private class Rendered(val image: RgbaImage, val quad: Quad?)
+
+    /**
+     * The one way an existing page is rendered: geometry from the page, look from [look].
+     *
+     * Every re-render — a rotation, a filter change, an edit, "apply to all" — comes through here,
+     * so a page can never be re-rendered at a strength it was not saved with. [outlineNorm] is in
+     * fractions of the rotated source frame, which is what lets a stored outline survive a change
+     * of decode resolution.
+     */
+    private fun renderLook(
+        source: RgbaImage,
+        look: PageLook,
+        outlineNorm: Quad,
+        rotationDegrees: Int,
+        deskewDegrees: Double,
+    ): Rendered {
+        val rotation = ((rotationDegrees % 360) + 360) % 360
+        val rotatedWidth = if (rotation % 180 == 0) source.width else source.height
+        val rotatedHeight = if (rotation % 180 == 0) source.height else source.width
+        val quad = outlineNorm.inFrame(rotatedWidth, rotatedHeight)
+        val settings = look.toSettings(
+            quad = quad,
+            rotationDegrees = rotation,
+            deskewDegrees = deskewDegrees,
+            maxOutputEdge = settings.current.maxImageEdge,
+        )
+        return Rendered(ScanProcessor.process(source, settings), quad)
+    }
+
+    /**
+     * The page's stored outline as fractions of the frame [rotationDegrees] produces.
+     *
+     * Corners are stored as pixels — the frame the capture's own decode produced — so they have to
+     * be divided by the frame the original decodes to now before they can be scaled back up to it.
+     * No corners means the full frame, which is what a page written without a crop is.
+     */
+    private fun storedOutline(page: Page, source: RgbaImage, rotationDegrees: Int): Quad {
+        val rotation = ((rotationDegrees % 360) + 360) % 360
+        val rotatedWidth = if (rotation % 180 == 0) source.width else source.height
+        val rotatedHeight = if (rotation % 180 == 0) source.height else source.width
+        val stored = Corners.parse(page.corners) ?: return Quad.rect(1.0, 1.0)
+        return stored.scaled(1.0 / rotatedWidth, 1.0 / rotatedHeight)
+    }
+
+    /** Writes [rendered] over the page's file and moves the row onto it, look included. */
+    private suspend fun writePage(
+        page: Page,
+        look: PageLook,
+        rendered: Rendered,
+        rotationDegrees: Int,
+        deskewDegrees: Double,
+    ): Boolean {
+        val destination = File(page.processedPath)
+        if (!BitmapBridge.saveJpeg(rendered.image, destination, settings.current.jpegQuality)) {
+            return false
+        }
+        withContext(Dispatchers.IO) {
+            store.updatePageResult(
+                pageId = page.id,
+                processedPath = destination.absolutePath,
+                look = look,
+                rotation = ((rotationDegrees % 360) + 360) % 360,
+                corners = rendered.quad?.let { Corners.serialize(it) },
+                width = rendered.image.width,
+                height = rendered.image.height,
+                deskewDegrees = deskewDegrees,
+            )
+        }
+        return true
+    }
+
+    /**
      * Rotates a finished page clockwise by [degrees] (a multiple of 90) from its current
-     * state, keeping its crop aligned.
+     * state, keeping its crop and its look.
      *
      * The outline is stored in the coordinate space of the *rotated* original, so it has to
      * be rotated with the same mapping the pixels use; reprocessing then re-crops from the
      * untouched original rather than from an already-compressed render. [ensureReprocessableOriginal]
      * runs first, so the rotation is applied once and never compounds across taps.
+     *
+     * The look and the skew come from the row: turning a page is a change of geometry, and a turn
+     * that re-rendered at full strength with no deskew would quietly repaint the page.
      */
     suspend fun rotateBy(pageId: Long, degrees: Int): Boolean = withContext(Dispatchers.Default) {
         val turn = ((degrees % 360) + 360) % 360
@@ -307,39 +503,19 @@ class ScanRepository(
 
         val found = withContext(Dispatchers.IO) { store.getPage(pageId) } ?: return@withContext false
         val page = ensureReprocessableOriginal(found) ?: return@withContext false
-        val original = BitmapBridge.decodeFile(File(page.originalPath), settings.current.maxImageEdge)
-            ?: return@withContext false
+        val source = decodeOriginal(page) ?: return@withContext false
 
         val current = ((page.rotation % 360) + 360) % 360
-        val rotated = Transforms.rotate(original, current)
-        val existing = Corners.parse(page.corners)
-
         val nextRotation = (current + turn) % 360
-        val nextQuad = rotateQuadBy(existing, turn / 90, rotated.width, rotated.height)
+        // Fractions of the current frame, turned with the pixels: the same outline describes the
+        // same physical edge in the frame the page is about to be rendered into.
+        val nextOutline = storedOutline(page, source, current).rotatedQuarterTurns(turn / 90)
 
-        val scan = ScanProcessor.Settings(
-            quad = nextQuad,
-            rotationDegrees = nextRotation,
-            filter = ScanFilter.fromId(page.filterId),
-            maxOutputEdge = settings.current.maxImageEdge,
-        )
-        val rendered = ScanProcessor.process(original, scan)
-        val destination = File(page.processedPath)
-        if (!BitmapBridge.saveJpeg(rendered, destination, settings.current.jpegQuality)) {
+        val rendered = renderLook(source, page.look, nextOutline, nextRotation, page.deskewDegrees)
+        if (!writePage(page, page.look, rendered, nextRotation, page.deskewDegrees)) {
             return@withContext false
         }
-        withContext(Dispatchers.IO) {
-            store.updatePageResult(
-                pageId = pageId,
-                processedPath = destination.absolutePath,
-                filterId = page.filterId,
-                rotation = nextRotation,
-                corners = nextQuad?.let { Corners.serialize(it) },
-                width = rendered.width,
-                height = rendered.height,
-            )
-            refreshThumbnail(page.documentId)
-        }
+        withContext(Dispatchers.IO) { refreshThumbnail(page.documentId) }
         true
     }
 
@@ -396,12 +572,14 @@ class ScanRepository(
                         index = previous.index,
                         originalPath = (originalFile ?: pageFile).absolutePath,
                         processedPath = pageFile.absolutePath,
-                        filterId = replacement.filterId,
+                        filterId = replacement.look.filter.id,
                         rotation = replacement.rotation,
                         corners = replacement.quad?.let { Corners.serialize(it) },
                         width = replacement.image.width,
                         height = replacement.image.height,
                         flipDecided = replacement.flipDecided,
+                        look = replacement.look,
+                        deskewDegrees = replacement.deskewDegrees,
                     )
                 }
             } catch (failure: Exception) {
@@ -469,21 +647,6 @@ class ScanRepository(
             )
         }
         return page.copy(originalPath = frozen.absolutePath, rotation = 0, corners = null)
-    }
-
-    /** [quad] rotated [times] quarter turns clockwise, tracking the frame it lives in. */
-    private fun rotateQuadBy(quad: Quad?, times: Int, width: Int, height: Int): Quad? {
-        if (quad == null) return null
-        var current: Quad = quad
-        var frameWidth = width
-        var frameHeight = height
-        repeat(((times % 4) + 4) % 4) {
-            current = Transforms.rotateQuad90(current, frameWidth, frameHeight)
-            val swap = frameWidth
-            frameWidth = frameHeight
-            frameHeight = swap
-        }
-        return current
     }
 
     suspend fun deletePage(pageId: Long): Long? = withContext(Dispatchers.IO) {

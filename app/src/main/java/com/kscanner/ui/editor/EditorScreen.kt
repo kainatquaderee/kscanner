@@ -28,11 +28,13 @@ import androidx.compose.material.icons.outlined.RotateRight
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
@@ -71,6 +73,7 @@ import com.kscanner.core.imaging.DetectMethod
 import com.kscanner.core.imaging.Pt
 import com.kscanner.core.imaging.Quad
 import com.kscanner.core.imaging.ScanFilter
+import com.kscanner.data.ApplyLook
 import com.kscanner.ui.EditorViewModel
 import com.kscanner.ui.components.DragClaim
 import com.kscanner.ui.components.LoadingOverlay
@@ -86,8 +89,10 @@ fun EditorScreen(
     documentId: Long?,
     onSaved: (Long) -> Unit,
     onCancel: () -> Unit,
+    pageId: Long = -1L,
+    onViewPages: () -> Unit = {},
 ) {
-    LaunchedEffect(path) { viewModel.load(path) }
+    LaunchedEffect(path, pageId) { viewModel.load(path, pageId) }
 
     // One zoom per page, reused by both stages. It is reset when the stage changes and when the
     // picture turns: keying on the size of the drawn bitmap instead would reset the zoom in the
@@ -97,6 +102,7 @@ fun EditorScreen(
 
     val snackbarHostState = remember { SnackbarHostState() }
     var adjustSheetOpen by remember { mutableStateOf(false) }
+    var confirmApply by remember { mutableStateOf(false) }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     LaunchedEffect(viewModel.error) {
@@ -159,8 +165,11 @@ fun EditorScreen(
                     strength = viewModel.strength,
                     onStrength = viewModel::updateStrength,
                     saving = viewModel.saving,
+                    canApplyToAll = viewModel.canApplyToAll,
+                    applying = viewModel.applying,
                     onAutoEnhance = viewModel::autoEnhance,
                     onCrop = viewModel::backToCropStage,
+                    onApplyToAll = { confirmApply = true },
                     onSave = { viewModel.save(documentId, onSaved) },
                 )
             }
@@ -243,6 +252,64 @@ fun EditorScreen(
                 }
             }
         }
+    }
+
+    if (confirmApply) {
+        AlertDialog(
+            onDismissRequest = { confirmApply = false },
+            title = { Text("Apply to all") },
+            text = { Text(ApplyLook.confirmation(viewModel.otherPageCount)) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmApply = false
+                        viewModel.applyToAll()
+                    },
+                ) { Text("Apply") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmApply = false }) { Text("Cancel") }
+            },
+        )
+    }
+
+    val progress = viewModel.applyProgress
+    if (progress != null) {
+        AlertDialog(
+            // The run is not dismissed by tapping outside it: the only way out is Cancel, which
+            // stops after the page in flight rather than leaving the work half-described.
+            onDismissRequest = {},
+            title = { Text("Apply to all") },
+            text = {
+                Column {
+                    Text(progress)
+                    LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 12.dp))
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = viewModel::cancelApply) { Text("Cancel") }
+            },
+        )
+    }
+
+    val summary = viewModel.applySummary
+    if (summary != null) {
+        AlertDialog(
+            onDismissRequest = { viewModel.clearApplySummary() },
+            title = { Text("Apply to all") },
+            text = { Text(summary) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        viewModel.clearApplySummary()
+                        onViewPages()
+                    },
+                ) { Text("View pages") }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.clearApplySummary() }) { Text("Done") }
+            },
+        )
     }
 }
 
@@ -527,8 +594,11 @@ private fun FilterBar(
     strength: Float,
     onStrength: (Float) -> Unit,
     saving: Boolean,
+    canApplyToAll: Boolean,
+    applying: Boolean,
     onAutoEnhance: () -> Unit,
     onCrop: () -> Unit,
+    onApplyToAll: () -> Unit,
     onSave: () -> Unit,
 ) {
     Surface(color = MaterialTheme.colorScheme.surface, tonalElevation = 3.dp) {
@@ -590,7 +660,14 @@ private fun FilterBar(
                 TextButton(onClick = onCrop) { Text("Crop") }
                 TextButton(onClick = onAutoEnhance) { Text("Auto") }
                 Spacer(Modifier.weight(1f))
-                Button(onClick = onSave, enabled = !saving) {
+                if (canApplyToAll) {
+                    // Beside Save page, and only when there is another page to copy onto: the
+                    // page being edited is what the others are made to match.
+                    TextButton(onClick = onApplyToAll, enabled = !saving && !applying) {
+                        Text("Apply to all")
+                    }
+                }
+                Button(onClick = onSave, enabled = !saving && !applying) {
                     if (saving) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(16.dp),

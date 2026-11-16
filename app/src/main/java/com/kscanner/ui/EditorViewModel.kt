@@ -10,9 +10,11 @@ import androidx.lifecycle.viewModelScope
 import com.kscanner.core.imaging.AutoCrop
 import com.kscanner.core.imaging.BitmapBridge
 import com.kscanner.core.imaging.CaptureAdvice
+import com.kscanner.core.imaging.Corners
 import com.kscanner.core.imaging.DetectMethod
 import com.kscanner.core.imaging.DocDetector
 import com.kscanner.core.imaging.Filters
+import com.kscanner.core.imaging.PageLook
 import com.kscanner.core.imaging.PageTurn
 import com.kscanner.core.imaging.Quad
 import com.kscanner.core.imaging.RgbaImage
@@ -20,6 +22,9 @@ import com.kscanner.core.imaging.ScanFilter
 import com.kscanner.core.imaging.ScanProcessor
 import com.kscanner.core.imaging.Skew
 import com.kscanner.core.imaging.Transforms
+import com.kscanner.core.imaging.inFrame
+import com.kscanner.data.ApplyLook
+import com.kscanner.data.Page
 import com.kscanner.data.ScanRepository
 import com.kscanner.data.SettingsStore
 import kotlinx.coroutines.Dispatchers
@@ -134,6 +139,50 @@ class EditorViewModel(
     private var previewJob: Job? = null
 
     /**
+     * The stored page this editor opened, or null when it is editing a fresh capture.
+     *
+     * Everything that differs between "save a new page" and "update the page that is already
+     * there" hangs off this: a page that exists keeps its row and its position, and the document
+     * around it is what "apply to all" copies onto.
+     */
+    private var loadedPage: Page? = null
+    private var loadedPages: List<Page> = emptyList()
+
+    /** Id of the page being edited, or -1 when this editor is preparing a new capture. */
+    var editingPageId by mutableStateOf(-1L)
+        private set
+
+    /** How many pages the page being edited shares a document with, itself included. */
+    var documentPageCount by mutableStateOf(0)
+        private set
+
+    /** True when the look can be copied: an existing page in a document of two or more. */
+    val canApplyToAll: Boolean get() = ApplyLook.isAvailable(documentPageCount, editingPageId)
+
+    /** How many pages "apply to all" would change: every page but the one open here. */
+    val otherPageCount: Int get() = ApplyLook.targets(loadedPages, editingPageId).size
+
+    var applying by mutableStateOf(false)
+        private set
+
+    /** "Applying page 3 of 11...", or null when no run is in flight. */
+    var applyProgress by mutableStateOf<String?>(null)
+        private set
+
+    /** What the last run achieved, or null when there is nothing to report. */
+    var applySummary by mutableStateOf<String?>(null)
+        private set
+
+    /**
+     * Set from the main thread when the user presses Cancel on a run.
+     *
+     * Volatile because the run reads it between pages on a background dispatcher; a plain field
+     * could leave the loop reading a stale `false` and finish a document the user stopped.
+     */
+    @Volatile
+    private var applyCancelled = false
+
+    /**
      * The page without its look, kept between filter changes; see [geometryFor].
      *
      * Volatile because it is built on a background dispatcher and read from whichever thread
@@ -145,15 +194,19 @@ class EditorViewModel(
 
     val hasImage: Boolean get() = original != null
 
-    fun load(path: String) {
-        if (sourcePath == path && original != null) return
+    fun load(path: String, pageId: Long = -1L) {
+        if (sourcePath == path && original != null && editingPageId == pageId) return
         sourcePath = path
+        editingPageId = pageId
         loading = true
         analysing = true
         error = null
         viewModelScope.launch {
+            // Decoded at the same edge the repository renders at. A page's stored outline is in
+            // pixels of that frame, so opening it in any other frame would misplace the crop — and
+            // because saving writes the outline back out, each edit would enlarge it again.
             val decoded = withContext(Dispatchers.Default) {
-                BitmapBridge.decodeFile(File(path), 2400)
+                BitmapBridge.decodeFile(File(path), settingsStore.current.maxImageEdge)
             }
             if (decoded == null) {
                 error = "That image could not be opened."
@@ -162,16 +215,81 @@ class EditorViewModel(
                 return@launch
             }
             original = decoded
-            turn = PageTurn()
-            filter = settingsStore.defaultFilter
-            strength = 1f
-            brightness = 0f
-            contrast = 0f
-            sharpness = 0f
-            runAutoPass(applyStyle = true)
+            val page = if (pageId >= 0) {
+                withContext(Dispatchers.IO) { repository.getPage(pageId) }
+            } else {
+                null
+            }
+            if (page != null) {
+                restorePage(page, decoded)
+            } else {
+                loadedPage = null
+                loadedPages = emptyList()
+                documentPageCount = 0
+                stage = Stage.CROP
+                turn = PageTurn()
+                filter = settingsStore.defaultFilter
+                strength = 1f
+                brightness = 0f
+                contrast = 0f
+                sharpness = 0f
+                deskewDegrees = 0.0
+                runAutoPass(applyStyle = true)
+            }
             loading = false
             analysing = false
         }
+    }
+
+    /**
+     * Opens a page that already exists as it is: its stored outline, its stored rotation, its
+     * stored skew and its stored look, with no automatic pass in between.
+     *
+     * Running detection here would be wrong twice over. It would re-decide an outline the user may
+     * have placed by hand, and it would pick a preset from the original's statistics — replacing
+     * the look that is the reason the page looks the way it does. Nothing is re-derived, so opening
+     * a page and saving it again leaves it alone.
+     *
+     * A page whose original *is* its processed file has its geometry baked into its pixels, so it
+     * opens with no rotation, no outline and no skew: those would otherwise be applied a second
+     * time on top of pixels that already carry them.
+     */
+    private suspend fun restorePage(page: Page, source: RgbaImage) {
+        loadedPage = page
+        loadedPages = withContext(Dispatchers.IO) { repository.pages(page.documentId) }
+        documentPageCount = loadedPages.size.coerceAtLeast(1)
+
+        val baked = page.originalPath == page.processedPath
+        turn = if (baked) PageTurn() else PageTurn(planQuarterTurns = 0, userQuarterTurns = (page.rotation / 90) % 4)
+        quadNorm = if (baked) {
+            Quad.rect(1.0, 1.0)
+        } else {
+            val rotatedWidth = if (rotation % 180 == 0) source.width else source.height
+            val rotatedHeight = if (rotation % 180 == 0) source.height else source.width
+            Corners.parse(page.corners)?.scaled(1.0 / rotatedWidth, 1.0 / rotatedHeight)
+                ?: Quad.rect(1.0, 1.0)
+        }
+        deskewDegrees = if (baked) 0.0 else page.deskewDegrees
+
+        filter = page.look.filter
+        strength = page.look.strength
+        brightness = page.look.brightness
+        contrast = page.look.contrast
+        sharpness = page.look.sharpness
+
+        // Nothing was detected on this page now, so the crop stage must not claim it was.
+        autoDetected = false
+        detectionMethod = null
+        detectionConfidence = 0.0
+        advice = CaptureAdvice.GOOD
+
+        previewBitmap = withContext(Dispatchers.Default) {
+            val rotated = Transforms.rotate(source, rotation)
+            BitmapBridge.toBitmap(Transforms.fitLongestEdge(rotated, CROP_PREVIEW_EDGE)).asImageBitmap()
+        }
+        // The look is what the page is being opened to change, so the filter stage is where it
+        // lands; the crop stage is still one tap away and opens on the stored outline.
+        openFilterStage()
     }
 
     // ------------------------------------------------------------ automatic pass
@@ -504,37 +622,58 @@ class EditorViewModel(
     fun quadInPreview(bitmap: ImageBitmap): Quad =
         quadNorm.scaled(bitmap.width.toDouble(), bitmap.height.toDouble())
 
+    private fun currentLook(): PageLook = PageLook(
+        filter = filter,
+        strength = strength,
+        brightness = brightness,
+        contrast = contrast,
+        sharpness = sharpness,
+    )
+
     private fun buildSettings(source: RgbaImage): ScanProcessor.Settings {
         val rotatedWidth = if (rotation % 180 == 0) source.width else source.height
         val rotatedHeight = if (rotation % 180 == 0) source.height else source.width
-        val quadFull = if (quadNorm.area() >= 0.999) {
-            null // full frame: skip the resampling entirely
-        } else {
-            quadNorm.scaled(rotatedWidth.toDouble(), rotatedHeight.toDouble())
-        }
-        return ScanProcessor.Settings(
-            quad = quadFull,
+        // The look and the geometry meet in PageLook.toSettings, which is also what every
+        // re-render of a saved page uses, so the page saved here and the page rendered later
+        // cannot disagree about what it looks like.
+        return currentLook().toSettings(
+            quad = quadNorm.inFrame(rotatedWidth, rotatedHeight),
             rotationDegrees = rotation,
             deskewDegrees = deskewDegrees,
-            filter = filter,
-            strength = strength,
-            brightness = brightness,
-            contrast = contrast,
-            sharpness = sharpness,
             maxOutputEdge = settingsStore.current.maxImageEdge,
         )
     }
 
-    /** Commits the page; [onSaved] receives the document id. */
+    /**
+     * Commits the page; [onSaved] receives the document id.
+     *
+     * A page opened from an existing document is *updated*: same row, same position, new bytes.
+     * Saving it as a new page would leave the document holding both the old page and a copy of it,
+     * and the copy would be at the end of the run rather than where the user was.
+     */
     fun save(documentId: Long?, onSaved: (Long) -> Unit) {
         val source = original ?: return
         val path = sourcePath ?: return
         if (saving) return
         saving = true
         error = null
+        val pageId = editingPageId
+        val fallbackDocumentId = documentId ?: loadedPage?.documentId
         viewModelScope.launch {
             runCatching {
-                repository.saveCapture(documentId, path, buildSettings(source))
+                if (pageId >= 0) {
+                    val updated = repository.updatePage(
+                        pageId = pageId,
+                        outlineNorm = quadNorm,
+                        rotationDegrees = rotation,
+                        deskewDegrees = deskewDegrees,
+                        look = currentLook(),
+                    )
+                    if (!updated) throw IllegalStateException("That page could not be saved.")
+                    fallbackDocumentId ?: throw IllegalStateException("That page could not be saved.")
+                } else {
+                    repository.saveCapture(documentId, path, buildSettings(source))
+                }
             }.onSuccess { id ->
                 saving = false
                 onSaved(id)
@@ -543,6 +682,61 @@ class EditorViewModel(
                 error = failure.message ?: "The page could not be saved."
             }
         }
+    }
+
+    // ------------------------------------------------------------ apply to all
+
+    /**
+     * Copies the look on screen onto every other page of the document.
+     *
+     * Only the look: each page is re-rendered from its own original through its own outline,
+     * rotation and skew. The page open here is left alone — it is what the others are being made
+     * to match. Cancelling stops the run but does not undo it; [applySummary] reports how far it
+     * got rather than pretending the document is as it was.
+     */
+    fun applyToAll() {
+        if (applying || !canApplyToAll) return
+        val page = loadedPage ?: return
+        val targets = ApplyLook.targets(loadedPages, editingPageId)
+        if (targets.isEmpty()) return
+
+        val look = currentLook()
+        applying = true
+        applyCancelled = false
+        applyProgress = null
+        applySummary = null
+        viewModelScope.launch {
+            val result = runCatching {
+                repository.applyLookToPages(
+                    documentId = page.documentId,
+                    pageIds = targets.map { it.id },
+                    look = look,
+                    onProgress = { number, total -> applyProgress = ApplyLook.progress(number, total) },
+                    cancelled = { applyCancelled },
+                )
+            }
+            applying = false
+            applyProgress = null
+            result.onSuccess { outcome ->
+                applySummary = ApplyLook.summary(
+                    applied = outcome.applied,
+                    failed = outcome.failed,
+                    cancelled = outcome.cancelled,
+                    total = targets.size,
+                )
+            }.onFailure { failure ->
+                error = failure.message ?: "The look could not be applied."
+            }
+        }
+    }
+
+    /** Asks the running copy to stop after the page it is on. */
+    fun cancelApply() {
+        applyCancelled = true
+    }
+
+    fun clearApplySummary() {
+        applySummary = null
     }
 
     fun clearError() {

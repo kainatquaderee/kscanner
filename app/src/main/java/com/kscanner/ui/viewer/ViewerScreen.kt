@@ -27,6 +27,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Flip
 import androidx.compose.material.icons.outlined.RotateRight
 import androidx.compose.material.icons.outlined.Share
@@ -73,6 +74,7 @@ fun ViewerScreen(
     documentId: Long,
     startPage: Int,
     onBack: () -> Unit,
+    onEditPage: (Page) -> Unit,
 ) {
     LaunchedEffect(documentId) { viewModel.load(documentId) }
 
@@ -81,10 +83,32 @@ fun ViewerScreen(
     val context = LocalContext.current
     var showText by remember { mutableStateOf(false) }
 
+    // The page last looked at, not the one the route was opened with: coming back from the editor
+    // has to land on the page that was edited, which may be many swipes from the start page the
+    // caller navigated with. Captured once, because the pager is built while the page list is
+    // still empty and the effect below records whatever page it is showing — including the
+    // placeholder 0 — so re-reading it afterwards would lose what was asked for.
+    val landingPage = remember { (viewModel.viewedPage ?: startPage).coerceAtLeast(0) }
+
     val pagerState = rememberPagerState(
-        initialPage = startPage.coerceAtLeast(0),
+        initialPage = landingPage,
         pageCount = { pages.size },
     )
+
+    // An initial page is not enough on its own: with no pages to measure it can settle on 0 and
+    // stay there once they arrive. Jump once, when they do, and never again — a later change in
+    // count must not drag the user back off the page they are reading.
+    var landed by remember { mutableStateOf(false) }
+    LaunchedEffect(pages.size) {
+        if (landed || pages.isEmpty()) return@LaunchedEffect
+        landed = true
+        val target = landingPage.coerceIn(0, pages.lastIndex)
+        if (pagerState.currentPage != target) pagerState.scrollToPage(target)
+    }
+
+    LaunchedEffect(pagerState.currentPage, pages.size) {
+        if (pages.isNotEmpty()) viewModel.rememberViewedPage(pagerState.currentPage)
+    }
 
     LaunchedEffect(viewModel.error) {
         val message = viewModel.error ?: return@LaunchedEffect
@@ -110,6 +134,17 @@ fun ViewerScreen(
                     IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White) }
                 },
                 actions = {
+                    // First action in the row, and reading the pager rather than the route: it
+                    // edits the page that is on screen at the moment it is tapped, exactly as
+                    // the actions beside it do.
+                    IconButton(
+                        onClick = {
+                            val page = currentPage ?: return@IconButton
+                            onEditPage(page)
+                        },
+                    ) {
+                        Icon(Icons.Outlined.Edit, "Edit page", tint = Color.White)
+                    }
                     IconButton(
                         onClick = {
                             val page = currentPage ?: return@IconButton

@@ -43,6 +43,12 @@ class DbHelper(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION
                 height INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL,
                 flip_decided INTEGER,
+                deskew_degrees REAL NOT NULL DEFAULT 0,
+                look_strength REAL NOT NULL DEFAULT 1,
+                look_brightness REAL NOT NULL DEFAULT 0,
+                look_contrast REAL NOT NULL DEFAULT 0,
+                look_sharpness REAL NOT NULL DEFAULT 0,
+                render_revision INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
             )
             """.trimIndent(),
@@ -57,11 +63,28 @@ class DbHelper(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION
         // the column existed reads back as "the pass never ran", which the review does not
         // accuse of being undecided.
         if (oldVersion < 2) db.execSQL("ALTER TABLE pages ADD COLUMN flip_decided INTEGER")
+
+        // The look a page was given, kept beside the pixels so the editor can open the page as it
+        // is instead of guessing it. Every column has a non-null default that is also the neutral
+        // value — strength 1, adjustments 0, no skew — so a page written before the column existed
+        // reads back as "preset only, untouched", which is what it was.
+        //
+        // render_revision counts rewrites of processed_path. It starts at 0 for existing rows and
+        // is bumped by DocumentStore.updatePageResult, which is the only write that replaces the
+        // bytes in place; a decode cache keyed on it therefore cannot show a stale page.
+        if (oldVersion < 3) {
+            db.execSQL("ALTER TABLE pages ADD COLUMN deskew_degrees REAL NOT NULL DEFAULT 0")
+            db.execSQL("ALTER TABLE pages ADD COLUMN look_strength REAL NOT NULL DEFAULT 1")
+            db.execSQL("ALTER TABLE pages ADD COLUMN look_brightness REAL NOT NULL DEFAULT 0")
+            db.execSQL("ALTER TABLE pages ADD COLUMN look_contrast REAL NOT NULL DEFAULT 0")
+            db.execSQL("ALTER TABLE pages ADD COLUMN look_sharpness REAL NOT NULL DEFAULT 0")
+            db.execSQL("ALTER TABLE pages ADD COLUMN render_revision INTEGER NOT NULL DEFAULT 0")
+        }
     }
 
     companion object {
         const val NAME = "kscanner.db"
-        const val VERSION = 2
+        const val VERSION = 3
     }
 }
 
@@ -80,6 +103,11 @@ internal fun Cursor.number(column: String): Long {
 }
 
 internal fun Cursor.int(column: String): Int = number(column).toInt()
+
+internal fun Cursor.real(column: String): Double {
+    val index = getColumnIndexOrThrow(column)
+    return if (isNull(index)) 0.0 else getDouble(index)
+}
 
 /** The column's integer, or null when the stored value is NULL (distinct from 0). */
 internal fun Cursor.intOrNull(column: String): Int? {

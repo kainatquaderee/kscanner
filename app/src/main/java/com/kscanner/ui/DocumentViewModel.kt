@@ -44,6 +44,16 @@ class DocumentViewModel(
     var ocrCaption by mutableStateOf("")
         private set
 
+    /**
+     * The page the viewer was last showing, or null before it has shown one.
+     *
+     * Kept here rather than in the viewer's own state because the viewer is disposed while the
+     * editor is open: without it, coming back lands on the page the route was opened with, which
+     * after a few swipes is not the page that was edited.
+     */
+    var viewedPage by mutableStateOf<Int?>(null)
+        private set
+
     private var documentId: Long = -1L
 
     val settingsState = settings.state
@@ -64,6 +74,11 @@ class DocumentViewModel(
     fun refresh() {
         if (documentId < 0) return
         load(documentId)
+    }
+
+    /** Records which page the viewer is showing, so returning to it lands on the same one. */
+    fun rememberViewedPage(index: Int) {
+        viewedPage = index
     }
 
     fun rename(name: String) {

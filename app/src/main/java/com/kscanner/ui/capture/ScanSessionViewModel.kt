@@ -12,12 +12,14 @@ import com.kscanner.core.imaging.BitmapBridge
 import com.kscanner.core.imaging.Composite
 import com.kscanner.core.imaging.Filters
 import com.kscanner.core.imaging.Homography
+import com.kscanner.core.imaging.PageLook
 import com.kscanner.core.imaging.Quad
 import com.kscanner.core.imaging.RgbaImage
 import com.kscanner.core.imaging.ScanFilter
 import com.kscanner.core.imaging.ScanProcessor
 import com.kscanner.core.imaging.Spread
 import com.kscanner.core.imaging.Transforms
+import com.kscanner.core.imaging.toLook
 import com.kscanner.data.Page
 import com.kscanner.data.ScanMode
 import com.kscanner.data.ScanRepository
@@ -254,7 +256,7 @@ class ScanSessionViewModel(
                     heldSide = null
                     status = "Both sides captured"
                     val sheet = withContext(Dispatchers.Default) { Composite.stacked(first, rendered) }
-                    commit(listOf(sheet.toPage(measured.filter.id, measured.flipDecided)))
+                    commit(listOf(sheet.toPage(measured.look, measured.flipDecided)))
                 }
             }
         }
@@ -323,6 +325,9 @@ class ScanSessionViewModel(
         /** Whether the automatic pass could decide the page's up direction. */
         val flipDecided: Boolean? get() = plan.flipDecided
 
+        /** The preset and adjustments every page made from this shot is rendered with. */
+        val look: PageLook get() = base.toLook()
+
         /** The whole shot, cropped to the outline the detector proposed when there is one. */
         fun wholeShot(): RgbaImage = ScanProcessor.process(source, base.copy(quad = plan.quad))
 
@@ -334,7 +339,8 @@ class ScanSessionViewModel(
                 originalPath = originalPath,
                 quad = plan.quad,
                 rotation = plan.rotationDegrees,
-                filterId = filter.id,
+                look = look,
+                deskewDegrees = base.deskewDegrees,
                 flipDecided = plan.flipDecided,
             )
         }
@@ -374,19 +380,20 @@ class ScanSessionViewModel(
                     originalPath = null,
                     quad = half,
                     rotation = base.rotationDegrees,
-                    filterId = base.filter.id,
+                    look = look,
+                    deskewDegrees = base.deskewDegrees,
                     flipDecided = plan.flipDecided,
                 )
             }
         }
     }
 
-    private fun RgbaImage.toPage(filterId: Int, flipDecided: Boolean?) = ScanRepository.RenderedPage(
+    private fun RgbaImage.toPage(look: PageLook, flipDecided: Boolean?) = ScanRepository.RenderedPage(
         image = this,
         originalPath = null,
         quad = null,
         rotation = 0,
-        filterId = filterId,
+        look = look,
         flipDecided = flipDecided,
     )
 

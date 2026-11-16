@@ -40,8 +40,8 @@ private object Routes {
 
     fun camera(documentId: Long?) = "camera?documentId=${documentId ?: -1L}"
 
-    fun editor(path: String, documentId: Long?) =
-        "editor/${Uri.encode(path)}?documentId=${documentId ?: -1L}"
+    fun editor(path: String, documentId: Long?, pageId: Long = -1L) =
+        "editor/${Uri.encode(path)}?documentId=${documentId ?: -1L}&pageId=$pageId"
 
     fun document(id: Long) = "document/$id"
 
@@ -126,25 +126,47 @@ private fun KScannerNavHost() {
         }
 
         composable(
-            route = "editor/{path}?documentId={documentId}",
+            route = "editor/{path}?documentId={documentId}&pageId={pageId}",
             arguments = listOf(
                 navArgument("path") { type = NavType.StringType },
                 navArgument("documentId") { type = NavType.LongType; defaultValue = -1L },
+                navArgument("pageId") { type = NavType.LongType; defaultValue = -1L },
             ),
         ) { entry ->
             val encoded = entry.arguments?.getString("path").orEmpty()
             val path = Uri.decode(encoded)
             val documentId = entry.arguments?.getLong("documentId")?.takeIf { it >= 0 }
+            // A page id means this editor was opened on a page that already exists, and its
+            // result belongs on that page rather than on a new one at the end of the document.
+            val pageId = entry.arguments?.getLong("pageId") ?: -1L
             val viewModel: EditorViewModel = viewModel(factory = factory)
 
             EditorScreen(
                 viewModel = viewModel,
                 path = path,
                 documentId = documentId,
+                pageId = pageId,
                 onSaved = { id ->
-                    // Collapse the capture chain so Back from the document returns to the library.
-                    navController.popBackStack(Routes.LIBRARY, inclusive = false)
-                    navController.navigate(Routes.document(id))
+                    if (pageId >= 0) {
+                        // Back to the viewer, which re-reads the document and opens the page it
+                        // was on: the new render is what the user came back to see.
+                        navController.popBackStack()
+                    } else {
+                        // Collapse the capture chain so Back from the document returns to the library.
+                        navController.popBackStack(Routes.LIBRARY, inclusive = false)
+                        navController.navigate(Routes.document(id))
+                    }
+                },
+                onViewPages = {
+                    // "Apply to all" changed pages the editor is not showing, so the result is
+                    // the document itself; the editor has nothing left to say about it.
+                    val id = documentId
+                    if (id != null) {
+                        navController.popBackStack(Routes.LIBRARY, inclusive = false)
+                        navController.navigate(Routes.document(id))
+                    } else {
+                        navController.popBackStack()
+                    }
                 },
                 onCancel = { navController.popBackStack() },
             )
@@ -183,6 +205,10 @@ private fun KScannerNavHost() {
                 documentId = id,
                 startPage = page,
                 onBack = { navController.popBackStack() },
+                onEditPage = { page ->
+                    // The page that is on screen now, not the index this route was opened with.
+                    navController.navigate(Routes.editor(page.originalPath, page.documentId, page.id))
+                },
             )
         }
     }

@@ -3,6 +3,7 @@ package com.kscanner.data
 import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
+import com.kscanner.core.imaging.PageLook
 
 /**
  * Synchronous SQLite access for documents and pages. Callers are responsible for
@@ -127,6 +128,8 @@ class DocumentStore(context: Context) {
         width: Int,
         height: Int,
         flipDecided: Boolean? = null,
+        look: PageLook = PageLook(),
+        deskewDegrees: Double = 0.0,
         now: Long = System.currentTimeMillis(),
     ): Long = db().insert(
         "pages",
@@ -142,6 +145,8 @@ class DocumentStore(context: Context) {
             width = width,
             height = height,
             flipDecided = flipDecided,
+            look = look,
+            deskewDegrees = deskewDegrees,
             now = now,
         ),
     )
@@ -169,6 +174,8 @@ class DocumentStore(context: Context) {
         width: Int,
         height: Int,
         flipDecided: Boolean? = null,
+        look: PageLook = PageLook(),
+        deskewDegrees: Double = 0.0,
         now: Long = System.currentTimeMillis(),
     ): Long {
         val database = db()
@@ -188,6 +195,8 @@ class DocumentStore(context: Context) {
                     width = width,
                     height = height,
                     flipDecided = flipDecided,
+                    look = look,
+                    deskewDegrees = deskewDegrees,
                     now = now,
                 ),
             )
@@ -215,6 +224,8 @@ class DocumentStore(context: Context) {
         width: Int,
         height: Int,
         flipDecided: Boolean?,
+        look: PageLook,
+        deskewDegrees: Double,
         now: Long,
     ) = ContentValues().apply {
         put("document_id", documentId)
@@ -229,6 +240,11 @@ class DocumentStore(context: Context) {
         put("created_at", now)
         // NULL means no orientation plan ran, which is not the same as "could not tell".
         put("flip_decided", flipDecided?.let { if (it) 1 else 0 })
+        put("deskew_degrees", deskewDegrees)
+        put("look_strength", look.strength)
+        put("look_brightness", look.brightness)
+        put("look_contrast", look.contrast)
+        put("look_sharpness", look.sharpness)
     }
 
     fun getPages(documentId: Long): List<Page> =
@@ -246,24 +262,51 @@ class DocumentStore(context: Context) {
             if (cursor.moveToFirst()) cursor.toPage() else null
         }
 
+    /**
+     * Points a page at a freshly rendered file, in place.
+     *
+     * This is the only write that replaces the bytes behind an unchanged path, which makes it the
+     * only one that has to bump `render_revision` — and it does so in the same statement that moves
+     * the path, so a render cannot land without the number every decode cache watches moving with
+     * it.
+     *
+     * The look and the skew are written beside the path because they are what produced that render:
+     * leaving the old look on the row would describe a page the pipeline never made, and the next
+     * rotation would then bake in a look the user never chose.
+     */
     fun updatePageResult(
         pageId: Long,
         processedPath: String,
-        filterId: Int,
+        look: PageLook,
         rotation: Int,
         corners: String?,
         width: Int,
         height: Int,
+        deskewDegrees: Double,
     ) {
-        val values = ContentValues().apply {
-            put("processed_path", processedPath)
-            put("filter_id", filterId)
-            put("rotation", rotation)
-            put("corners", corners)
-            put("width", width)
-            put("height", height)
-        }
-        db().update("pages", values, "id = ?", arrayOf(pageId.toString()))
+        db().execSQL(
+            """
+            UPDATE pages
+               SET processed_path = ?, filter_id = ?, rotation = ?, corners = ?, width = ?, height = ?,
+                   look_strength = ?, look_brightness = ?, look_contrast = ?, look_sharpness = ?,
+                   deskew_degrees = ?, render_revision = render_revision + 1
+             WHERE id = ?
+            """.trimIndent(),
+            arrayOf<Any?>(
+                processedPath,
+                look.filter.id,
+                rotation,
+                corners,
+                width,
+                height,
+                look.strength,
+                look.brightness,
+                look.contrast,
+                look.sharpness,
+                deskewDegrees,
+                pageId,
+            ),
+        )
     }
 
     /**
@@ -359,6 +402,12 @@ class DocumentStore(context: Context) {
         width = int("width"),
         height = int("height"),
         createdAt = number("created_at"),
+        deskewDegrees = real("deskew_degrees"),
+        strength = real("look_strength").toFloat(),
+        brightness = real("look_brightness").toFloat(),
+        contrast = real("look_contrast").toFloat(),
+        sharpness = real("look_sharpness").toFloat(),
+        renderRevision = number("render_revision"),
         flipDecided = intOrNull("flip_decided")?.let { it != 0 },
     )
 
@@ -381,7 +430,9 @@ class DocumentStore(context: Context) {
 
         const val PAGE_SELECT = """
             SELECT id, document_id, page_index, original_path, processed_path, filter_id,
-                   rotation, corners, ocr_text, ocr_lines, width, height, created_at, flip_decided
+                   rotation, corners, ocr_text, ocr_lines, width, height, created_at, flip_decided,
+                   deskew_degrees, look_strength, look_brightness, look_contrast, look_sharpness,
+                   render_revision
             FROM pages
         """
     }

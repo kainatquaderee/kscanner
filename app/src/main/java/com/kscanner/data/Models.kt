@@ -1,5 +1,8 @@
 package com.kscanner.data
 
+import com.kscanner.core.imaging.PageLook
+import com.kscanner.core.imaging.ScanFilter
+
 /** A scanned document: an ordered collection of pages. */
 data class Document(
     val id: Long,
@@ -30,6 +33,19 @@ data class Page(
     val width: Int,
     val height: Int,
     val createdAt: Long,
+    /** Residual text skew removed from the cropped page, in degrees (clockwise positive). */
+    val deskewDegrees: Double = 0.0,
+    /** Preset strength the page was rendered at, 0..1. */
+    val strength: Float = 1f,
+    val brightness: Float = 0f,
+    val contrast: Float = 0f,
+    val sharpness: Float = 0f,
+    /**
+     * Counts rewrites of the bytes at [processedPath]. `DocumentStore.updatePageResult` bumps it
+     * in the same statement that points the row at a new render, so it is impossible to rewrite a
+     * page without the number moving.
+     */
+    val renderRevision: Long = 0L,
     /**
      * Whether the automatic pass could decide the 0-versus-180 flip, or null when no plan
      * ran for this page (an import, a page written before the flag existed).
@@ -39,12 +55,15 @@ data class Page(
      */
     val flipDecided: Boolean? = null,
 ) {
-    /**
-     * Moves whenever the bytes at [processedPath] are rewritten in place — a rotation or a
-     * filter change. A decode cache keys on it beside the file's own length and mtime, which
-     * can miss a same-length rewrite inside one timestamp tick.
-     */
-    val renderRevision: Int get() = rotation * 1000 + filterId
+    /** Preset and adjustments together; see [PageLook] for why the two travel as one value. */
+    val look: PageLook
+        get() = PageLook(
+            filter = ScanFilter.fromId(filterId),
+            strength = strength,
+            brightness = brightness,
+            contrast = contrast,
+            sharpness = sharpness,
+        )
 }
 
 enum class DocumentSort(val label: String) {

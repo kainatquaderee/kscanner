@@ -24,8 +24,19 @@ class OutlineTrackerTest {
         Pt(1.0, 4.0),
     )
 
-    /** The same page, one frame pixel to the right: the camera moved. */
-    private val moved = found.translated(1.0, 0.0)
+    /**
+     * The same page a quarter of a frame pixel to the right: the camera moved. At this fixture's
+     * scale of 25 that is 6.25 view px, which clears the deadband (5 px) and so is worth following,
+     * while staying a tenth of the page's own span (55.9 view px) — the same page seen again,
+     * rather than a different guess at where it is.
+     */
+    private val moved = found.translated(0.25, 0.0)
+
+    /**
+     * A page somewhere else entirely: 3 frame pixels is 75 view px, more than the page's own span,
+     * so this is a different place rather than the same page seen again.
+     */
+    private val elsewhere = found.translated(3.0, 0.0)
 
     private fun detection(quad: Quad, confidence: Double = 0.9) =
         Detection(quad, confidence, DetectMethod.EDGES)
@@ -132,7 +143,7 @@ class OutlineTrackerTest {
         val quarter = between(onScreen(found), onScreen(moved), 0.25)
         assertQuad(quarter, tracker.sample(1_030))
 
-        val further = moved.translated(1.0, 0.0)
+        val further = moved.translated(0.25, 0.0)
         tracker.accept(detection(further), frame, 100, 100, now = 1_030)
 
         assertQuad(quarter, tracker.sample(1_030))
@@ -199,5 +210,75 @@ class OutlineTrackerTest {
             Quad(Pt(10.0, 10.0), Pt(30.0, 10.0), Pt(30.0, 20.0), Pt(10.0, 20.0)),
             tracker.sample(0),
         )
+    }
+
+    @Test
+    fun `a disagreement that is never withdrawn is eventually believed`() {
+        val tracker = tracker(tweenMillis = 0)
+        tracker.accept(detection(found), frame, 100, 100, now = 0)
+
+        // A tenth of a second per detection, as the preview paces them: three say "a page is here,
+        // but not here", which is not long enough to be a change of mind.
+        for (at in longArrayOf(1_000, 1_100, 1_200, 1_300)) {
+            tracker.accept(detection(elsewhere), frame, 100, 100, now = at)
+            assertQuad(onScreen(found), tracker.sample(at), "at $at")
+        }
+
+        // The hold's worth of it has been said, so it is believed: the outline goes there.
+        tracker.accept(detection(elsewhere), frame, 100, 100, now = 1_400)
+        assertQuad(onScreen(elsewhere), tracker.sample(1_400))
+    }
+
+    @Test
+    fun `a disagreement withdrawn before the hold is not believed`() {
+        val tracker = tracker(tweenMillis = 0)
+        tracker.accept(detection(found), frame, 100, 100, now = 0)
+
+        for (at in longArrayOf(1_000, 1_100, 1_200)) {
+            tracker.accept(detection(elsewhere), frame, 100, 100, now = at)
+        }
+        // The page is found where it was: a flicker, not a move, and the run is broken by it.
+        tracker.accept(detection(found), frame, 100, 100, now = 1_300)
+        assertQuad(onScreen(found), tracker.sample(1_300))
+
+        // A second run therefore starts its own clock and is not believed on the first run's count.
+        tracker.accept(detection(elsewhere), frame, 100, 100, now = 1_400)
+        tracker.accept(detection(elsewhere), frame, 100, 100, now = 1_700)
+        assertQuad(onScreen(found), tracker.sample(1_700))
+
+        tracker.accept(detection(elsewhere), frame, 100, 100, now = 1_800)
+        assertQuad(onScreen(elsewhere), tracker.sample(1_800))
+    }
+
+    @Test
+    fun `two descriptions of one page trading places are never believed`() {
+        // The measured defect, on this clock: while the page stands still the detector alternates
+        // between two descriptions of it, neither of them where the outline is. They are different
+        // places, so neither is a change of mind however long the alternation lasts.
+        val tracker = tracker(tweenMillis = 0)
+        tracker.accept(detection(found), frame, 100, 100, now = 0)
+        val rival = elsewhere.translated(1.0, 0.0)
+
+        var at = 1_000L
+        repeat(20) { i ->
+            tracker.accept(detection(if (i % 2 == 0) elsewhere else rival), frame, 100, 100, now = at)
+            at += OutlineTracker.DEFAULT_INTERVAL_MILLIS
+        }
+
+        assertQuad(onScreen(found), tracker.sample(at))
+    }
+
+    @Test
+    fun `a persistent disagreement nobody is sure about is not drawn either`() {
+        val tracker = tracker(tweenMillis = 0)
+        tracker.accept(detection(found), frame, 100, 100, now = 0)
+
+        var at = 1_000L
+        repeat(10) {
+            tracker.accept(detection(elsewhere, confidence = 0.4), frame, 100, 100, now = at)
+            at += OutlineTracker.DEFAULT_INTERVAL_MILLIS
+        }
+
+        assertQuad(onScreen(found), tracker.sample(at), "a guess is not a place to draw")
     }
 }

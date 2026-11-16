@@ -32,11 +32,12 @@ class AutoCaptureAnalyzer(
     private val onAdvice: (CaptureAdvice, Double) -> Unit,
     private val onFire: () -> Unit,
     /**
-     * A found outline, with the frame it was found in — the *sampled* frame, whose pixels the
-     * outline is expressed in. Only confident answers are reported: a missing detection is not
-     * news, since the tracker keeps drawing what it has.
+     * The frame's outlines, best first, with the frame they were found in — the *sampled* frame,
+     * whose pixels they are expressed in. The whole ranked set goes to the tracker rather than its
+     * winner: the ranking of two descriptions of the same page can swap between frames while the
+     * page stays put, and the tracker is the only place that knows which one is being followed.
      */
-    private val onOutline: (Detection, PreviewFrame) -> Unit,
+    private val onCandidates: (List<Detection>, PreviewFrame) -> Unit,
     /** Longest edge of the analysed frame. Small on purpose: this runs on every frame. */
     private val workingEdge: Int = 320,
     private val elapsed: () -> Long = { SystemClock.elapsedRealtime() },
@@ -69,9 +70,8 @@ class AutoCaptureAnalyzer(
             if (tracker.dueForDetection(now)) {
                 // The fallbacks are for a still photograph, where an outline around the ink is
                 // better than none: a live border hugging the text would read as the page edge.
-                DocDetector.detect(gray, allowFallbacks = false)?.let { found ->
-                    onOutline(found, sampled.frame)
-                }
+                val found = DocDetector.candidates(gray, allowFallbacks = false)
+                if (found.isNotEmpty()) onCandidates(found, sampled.frame)
             }
         } catch (_: Throwable) {
             // A dropped frame is never worth crashing the camera over.

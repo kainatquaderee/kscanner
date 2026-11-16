@@ -297,10 +297,10 @@ fun CameraScreen(
                             }
                         },
                         onFire = { if (autoCapture) mainHandler.post { shoot() } },
-                        onOutline = { found, frame ->
+                        onCandidates = { found, frame ->
                             mainHandler.post {
                                 outlineTracker.accept(
-                                    detection = found,
+                                    candidates = found,
                                     frame = frame,
                                     viewWidth = previewSize.width,
                                     viewHeight = previewSize.height,

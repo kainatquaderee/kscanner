@@ -104,6 +104,79 @@ object DocDetector {
     }
 
     /**
+     * Every outline this frame supports, best first — the same pipeline as [detect], stopped one
+     * step earlier.
+     *
+     * One answer per frame is not enough to follow a page calmly: the ranking of two descriptions
+     * of the same page can swap while nothing moves, and a caller that only ever hears the winner
+     * has to take each swap as a move. The shortlist the edge stage already builds is the useful
+     * part — the tight quad around the sheet is often the second entry — so it is reported rather
+     * than discarded.
+     *
+     * The first element is the answer [detect] gives for the same input: the two must not
+     * disagree about which outline the crop would take. The rest follow in descending confidence,
+     * which is the only figure comparable across the methods.
+     */
+    fun candidates(
+        image: RgbaImage,
+        workingEdge: Int = 700,
+        aspectHint: Double? = null,
+        allowFallbacks: Boolean = true,
+    ): List<Detection> {
+        if (image.width < MIN_SIDE_PX || image.height < MIN_SIDE_PX) return emptyList()
+
+        val scale = min(1.0, workingEdge.toDouble() / max(image.width, image.height))
+        val small = if (scale < 1.0) {
+            Transforms.resize(
+                image,
+                max(1, (image.width * scale).roundToInt()),
+                max(1, (image.height * scale).roundToInt()),
+            )
+        } else {
+            image
+        }
+        return candidatesIn(
+            gray = small.toGray(),
+            frameWidth = image.width,
+            frameHeight = image.height,
+            sx = image.width.toDouble() / small.width,
+            sy = image.height.toDouble() / small.height,
+            aspectHint = aspectHint,
+            allowFallbacks = allowFallbacks,
+        )
+    }
+
+    /** [candidates] straight from a grayscale frame, for the live preview path. */
+    fun candidates(
+        image: GrayImage,
+        workingEdge: Int = 700,
+        aspectHint: Double? = null,
+        allowFallbacks: Boolean = true,
+    ): List<Detection> {
+        if (image.width < MIN_SIDE_PX || image.height < MIN_SIDE_PX) return emptyList()
+
+        val scale = min(1.0, workingEdge.toDouble() / max(image.width, image.height))
+        val small = if (scale < 1.0) {
+            Transforms.resizeGray(
+                image,
+                max(1, (image.width * scale).roundToInt()),
+                max(1, (image.height * scale).roundToInt()),
+            )
+        } else {
+            image
+        }
+        return candidatesIn(
+            gray = small,
+            frameWidth = image.width,
+            frameHeight = image.height,
+            sx = image.width.toDouble() / small.width,
+            sy = image.height.toDouble() / small.height,
+            aspectHint = aspectHint,
+            allowFallbacks = allowFallbacks,
+        )
+    }
+
+    /**
      * The pipeline proper, on an image already at working scale. [sx] and [sy] scale the result
      * back up to the caller's original resolution.
      */
@@ -118,32 +191,91 @@ object DocDetector {
         allowFallbacks: Boolean,
     ): Detection? {
         val edge = detectByEdges(gray, aspectHint)
-        if (edge != null && edge.score >= ACCEPT) {
-            return finish(edge, DetectMethod.EDGES, sx, sy, frameWidth, frameHeight)
-        }
+        val settled = edge != null && edge.score >= ACCEPT
 
-        if (allowFallbacks) {
-            val bright = detectBrightRegion(gray, aspectHint)
-            if (bright != null && (edge == null || bright.score > edge.score)) {
-                return finish(bright, DetectMethod.BRIGHT_REGION, sx, sy, frameWidth, frameHeight)
-            }
-            val ink = detectInkBlock(gray, aspectHint)
-            if (ink != null && (edge == null || ink.score > edge.score)) {
-                return finish(ink, DetectMethod.TEXT_BLOCK, sx, sy, frameWidth, frameHeight)
-            }
-        }
+        // A confident edge result is final, so the fallbacks are not run at all: each is a
+        // segmentation pass of its own. When the edges were not sure, a fallback is only computed
+        // while it can still win, which is the order choose() ranks them in.
+        val bright = if (!settled && allowFallbacks) detectBrightRegion(gray, aspectHint) else null
+        val brightWins = bright != null && (edge == null || bright.score > edge.score)
+        val ink = if (!settled && allowFallbacks && !brightWins) detectInkBlock(gray, aspectHint) else null
 
-        // A below-threshold edge result still beats nothing: the caller shows it as a
-        // starting outline the user can nudge.
-        return edge?.let { finish(it, DetectMethod.EDGES, sx, sy, frameWidth, frameHeight) }
+        val (scored, method) = choose(edge, bright, ink) ?: return null
+        return finish(scored, method, sx, sy, frameWidth, frameHeight)
+    }
+
+    /**
+     * Every candidate in this frame, [detect]'s answer first. The fallbacks are computed
+     * unconditionally here — a caller asking for the ranking wants all of it — and carry the same
+     * method weights [finish] gives them, so a confidence means the same thing wherever it is read.
+     */
+    private fun candidatesIn(
+        gray: GrayImage,
+        frameWidth: Int,
+        frameHeight: Int,
+        sx: Double,
+        sy: Double,
+        aspectHint: Double?,
+        allowFallbacks: Boolean,
+    ): List<Detection> {
+        val edges = rankEdges(gray, aspectHint)
+        val bright = if (allowFallbacks) detectBrightRegion(gray, aspectHint) else null
+        val ink = if (allowFallbacks) detectInkBlock(gray, aspectHint) else null
+
+        val head = choose(edges.firstOrNull(), bright, ink)
+        val rest = ArrayList<Detection>(edges.size + 2)
+        for (i in edges.indices) {
+            if (head != null && head.second == DetectMethod.EDGES && i == 0) continue
+            rest.add(finish(edges[i], DetectMethod.EDGES, sx, sy, frameWidth, frameHeight))
+        }
+        if (head?.second != DetectMethod.BRIGHT_REGION && bright != null) {
+            rest.add(finish(bright, DetectMethod.BRIGHT_REGION, sx, sy, frameWidth, frameHeight))
+        }
+        if (head?.second != DetectMethod.TEXT_BLOCK && ink != null) {
+            rest.add(finish(ink, DetectMethod.TEXT_BLOCK, sx, sy, frameWidth, frameHeight))
+        }
+        rest.sortByDescending { it.confidence }
+
+        if (head == null) return rest
+        return listOf(finish(head.first, head.second, sx, sy, frameWidth, frameHeight)) + rest
+    }
+
+    /**
+     * Which candidate [detect] answers with, given whichever of the three the caller computed.
+     *
+     * The rule is the acceptance/fallback ordering the pipeline has always used: a confident edge
+     * result is final; otherwise a fallback takes over by outscoring the *raw* edge result (the
+     * method weights are applied afterwards, so they cannot change who wins); otherwise the edge
+     * result is reported even below threshold, because an outline the caller can nudge beats none.
+     * Both entry points go through here so they cannot disagree about the crop.
+     */
+    private fun choose(
+        edge: Scored?,
+        bright: Scored?,
+        ink: Scored?,
+    ): Pair<Scored, DetectMethod>? = when {
+        edge != null && edge.score >= ACCEPT -> edge to DetectMethod.EDGES
+        bright != null && (edge == null || bright.score > edge.score) -> bright to DetectMethod.BRIGHT_REGION
+        ink != null && (edge == null || ink.score > edge.score) -> ink to DetectMethod.TEXT_BLOCK
+        edge != null -> edge to DetectMethod.EDGES
+        else -> null
     }
 
     // ------------------------------------------------------------------ edges
 
-    private fun detectByEdges(gray: GrayImage, aspectHint: Double?): Scored? {
+    private fun detectByEdges(gray: GrayImage, aspectHint: Double?): Scored? =
+        rankEdges(gray, aspectHint).firstOrNull()
+
+    /**
+     * The edge stage's surviving shortlist, best first. [detectByEdges] is its first element: the
+     * shortlist is ordered by the same score that used to be compared one candidate at a time, and
+     * the sort is stable, so a tie still goes to the candidate that reached the shortlist list
+     * first.
+     */
+    private fun rankEdges(gray: GrayImage, aspectHint: Double?): List<Scored> {
         val minVotes = max(20, (min(gray.width, gray.height) * 0.18).toInt())
         val field = DocLines.extract(gray, minVotes)
-        if (field.familyA.size < 2 || field.familyB.size < 2) return null
+        if (field.familyA.size < 2 || field.familyB.size < 2) return emptyList()
 
         val shortlist = ArrayList<Scored>(8)
         var worstKept = 0.0
@@ -195,9 +327,9 @@ object DocDetector {
                 }
             }
         }
-        if (shortlist.isEmpty()) return null
+        if (shortlist.isEmpty()) return emptyList()
 
-        var best: Scored? = null
+        val survivors = ArrayList<Scored>(shortlist.size)
         for (candidate in shortlist) {
             val support = field.perimeterSupport(candidate.quad)
             val contrast = interiorContrast(gray, candidate.quad)
@@ -216,15 +348,19 @@ object DocDetector {
             val centre = Pt(field.width / 2.0, field.height / 2.0)
             if (candidate.quad.containsPoint(centre)) score += 0.02
 
-            if (best == null || score > best.score) best = Scored(candidate.quad, score)
+            survivors.add(Scored(candidate.quad, score))
         }
-        if (best == null) return null
+        if (survivors.isEmpty()) return emptyList()
+        survivors.sortByDescending { it.score }
 
-        val refined = field.refine(best.quad)
-        if (refined.isConvex() && insideFrame(refined, field.width, field.height)) {
-            best = Scored(refined, best.score)
+        return survivors.map { candidate ->
+            val refined = field.refine(candidate.quad)
+            if (refined.isConvex() && insideFrame(refined, field.width, field.height)) {
+                Scored(refined, candidate.score)
+            } else {
+                candidate
+            }
         }
-        return best
     }
 
     /** Total votes of the strongest lines that actually coincide with the quad's sides. */

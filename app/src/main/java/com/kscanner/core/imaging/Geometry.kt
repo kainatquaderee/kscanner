@@ -41,6 +41,17 @@ data class Quad(val tl: Pt, val tr: Pt, val br: Pt, val bl: Pt) {
 
     fun center(): Pt = Pt(points.sumOf { it.x } / 4.0, points.sumOf { it.y } / 4.0)
 
+    /**
+     * How far the furthest matching corner has to travel to turn this outline into [o]. Two
+     * descriptions of the same page differ corner-for-corner, so the largest of the four gaps is
+     * the amount a viewer would see move.
+     */
+    fun cornerDistance(o: Quad): Double {
+        var worst = 0.0
+        for (i in 0 until 4) worst = max(worst, points[i].dist(o.points[i]))
+        return worst
+    }
+
     fun edgeLengths(): DoubleArray = doubleArrayOf(
         tl.dist(tr),
         tr.dist(br),

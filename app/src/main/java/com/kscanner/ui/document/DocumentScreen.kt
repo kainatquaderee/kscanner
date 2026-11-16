@@ -34,6 +34,7 @@ import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.Flip
 import androidx.compose.material.icons.outlined.PictureAsPdf
 import androidx.compose.material.icons.outlined.RotateLeft
 import androidx.compose.material.icons.outlined.RotateRight
@@ -408,6 +409,16 @@ fun DocumentScreen(
                         .clickable {
                         actionPage = null
                         viewModel.rotatePage(page, clockwise = true)
+                    },
+                )
+                ListItem(
+                    headlineContent = { Text("Turn over") },
+                    leadingContent = { Icon(Icons.Outlined.Flip, null) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                        actionPage = null
+                        viewModel.turnOver(page)
                     },
                 )
                 ListItem(

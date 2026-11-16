@@ -24,6 +24,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Flip
 import androidx.compose.material.icons.outlined.RotateRight
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.TextFields
@@ -124,6 +125,14 @@ fun ViewerScreen(
                         },
                     ) {
                         Icon(Icons.Outlined.RotateRight, "Rotate", tint = Color.White)
+                    }
+                    IconButton(
+                        onClick = {
+                            val page = currentPage ?: return@IconButton
+                            viewModel.turnOver(page)
+                        },
+                    ) {
+                        Icon(Icons.Outlined.Flip, "Turn this page over", tint = Color.White)
                     }
                     IconButton(
                         onClick = {

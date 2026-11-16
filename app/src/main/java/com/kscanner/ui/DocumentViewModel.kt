@@ -90,10 +90,19 @@ class DocumentViewModel(
     }
 
     fun rotatePage(page: Page, clockwise: Boolean = true) {
+        turn(page, if (clockwise) 90 else 270, "Rotating…")
+    }
+
+    /** Turns a page upside down in one go, for one that came out the wrong way up. */
+    fun turnOver(page: Page) {
+        turn(page, 180, "Turning over…")
+    }
+
+    private fun turn(page: Page, degrees: Int, label: String) {
         viewModelScope.launch {
             busy = true
-            busyLabel = "Rotating…"
-            val ok = repository.rotateBy(page.id, if (clockwise) 90 else 270)
+            busyLabel = label
+            val ok = repository.rotateBy(page.id, degrees)
             busy = false
             if (!ok) error = "That page could not be rotated."
             refresh()

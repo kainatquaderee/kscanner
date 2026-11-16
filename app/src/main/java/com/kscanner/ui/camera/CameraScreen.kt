@@ -30,8 +30,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -357,78 +359,85 @@ fun CameraScreen(
             }
         }
 
-        // Top controls
-        Row(
+        // Top controls. The preview stays full bleed behind the status bar; only the strip that
+        // carries controls is inset, so nothing is drawn under the clock and the cutout.
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 12.dp)
+                .statusBarsPadding()
                 .align(Alignment.TopCenter),
-            verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconButton(onClick = onClose) {
-                Icon(Icons.Filled.Close, contentDescription = "Close camera", tint = Color.White)
-            }
-            Spacer(Modifier.weight(1f))
-            IconButton(onClick = { showGrid = !showGrid }) {
-                Icon(
-                    imageVector = if (showGrid) Icons.Outlined.GridOn else Icons.Outlined.GridOff,
-                    contentDescription = "Toggle grid",
-                    tint = Color.White,
-                )
-            }
-            IconButton(
-                onClick = {
-                    autoCapture = !autoCapture
-                    gate.reset()
-                    readiness = 0.0
-                    app.container.settings.update { it.copy(autoCapture = autoCapture) }
-                },
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(
-                    imageVector = Icons.Outlined.Timer,
-                    contentDescription = if (autoCapture) "Automatic shutter on" else "Automatic shutter off",
-                    tint = if (autoCapture) MaterialTheme.colorScheme.primary else Color.White,
-                )
+                IconButton(onClick = onClose) {
+                    Icon(Icons.Filled.Close, contentDescription = "Close camera", tint = Color.White)
+                }
+                Spacer(Modifier.weight(1f))
+                IconButton(onClick = { showGrid = !showGrid }) {
+                    Icon(
+                        imageVector = if (showGrid) Icons.Outlined.GridOn else Icons.Outlined.GridOff,
+                        contentDescription = "Toggle grid",
+                        tint = Color.White,
+                    )
+                }
+                IconButton(
+                    onClick = {
+                        autoCapture = !autoCapture
+                        gate.reset()
+                        readiness = 0.0
+                        app.container.settings.update { it.copy(autoCapture = autoCapture) }
+                    },
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Timer,
+                        contentDescription = if (autoCapture) "Automatic shutter on" else "Automatic shutter off",
+                        tint = if (autoCapture) MaterialTheme.colorScheme.primary else Color.White,
+                    )
+                }
+                IconButton(onClick = { torchOn = !torchOn }) {
+                    Icon(
+                        imageVector = if (torchOn) Icons.Outlined.FlashOn else Icons.Outlined.FlashOff,
+                        contentDescription = "Toggle flash",
+                        tint = if (torchOn) MaterialTheme.colorScheme.primary else Color.White,
+                    )
+                }
             }
-            IconButton(onClick = { torchOn = !torchOn }) {
-                Icon(
-                    imageVector = if (torchOn) Icons.Outlined.FlashOn else Icons.Outlined.FlashOff,
-                    contentDescription = "Toggle flash",
-                    tint = if (torchOn) MaterialTheme.colorScheme.primary else Color.White,
+
+            // What the next shot becomes (mode), and whether the run goes on after it (Batch).
+            // Two different questions, so they are two different controls: Batch is a toggle, and
+            // it is coloured differently from the mode chips so it does not read as a fourth mode.
+            FlowRow(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                for (option in ScanMode.entries) {
+                    ModeChip(
+                        mode = option,
+                        active = session.mode == option,
+                        onClick = { session.updateMode(option) },
+                    )
+                }
+                BatchChip(
+                    active = session.batch,
+                    onClick = { session.updateBatch(!session.batch) },
                 )
             }
         }
 
-        // What the next shot becomes (mode), and whether the run goes on after it (Batch).
-        // Two different questions, so they are two different controls: Batch is a toggle, and
-        // it is coloured differently from the mode chips so it does not read as a fourth mode.
-        FlowRow(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 56.dp)
-                .align(Alignment.TopCenter)
-                .padding(horizontal = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            for (option in ScanMode.entries) {
-                ModeChip(
-                    mode = option,
-                    active = session.mode == option,
-                    onClick = { session.updateMode(option) },
-                )
-            }
-            BatchChip(
-                active = session.batch,
-                onClick = { session.updateBatch(!session.batch) },
-            )
-        }
-
-        // Bottom controls
+        // Bottom controls, lifted clear of the navigation bar: the shutter is the one control that
+        // must not share its strip with the system's, or a tap lands on Home instead of Capture.
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
+                .navigationBarsPadding()
                 .padding(bottom = 28.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {

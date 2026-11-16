@@ -5,13 +5,19 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.nio.ByteBuffer
 
+/**
+ * The automatic shutter's gate, and the luma plane every frame it judges arrives in.
+ *
+ * The gate is the one place that decides a shot is taken without being asked, so it is tested on
+ * its own terms: what counts as a new sighting of the same page, what counts as a different one,
+ * and what the page has to be for the answer to be yes. The clock and the detections are arguments,
+ * so none of this needs a camera or a sleep.
+ */
 class CaptureTest {
 
-    private fun report(
-        sharpness: Double = 0.2,
-        advice: CaptureAdvice = CaptureAdvice.GOOD,
-    ) = Quality.Report(
-        sharpness = sharpness,
+    /** A page region the gate could fire on: what [Quality.analysePage] reports for a good page. */
+    private fun report(advice: CaptureAdvice = CaptureAdvice.GOOD) = Quality.Report(
+        sharpness = 0.02,
         meanLuma = 180.0,
         contrast = 40.0,
         darkFraction = 0.01,
@@ -23,54 +29,140 @@ class CaptureTest {
         detectedText = true,
     )
 
-    @Test
-    fun `the gate wants several good frames in a row`() {
-        val gate = CaptureGate(requiredFrames = 3, cooldownFrames = 2)
+    /**
+     * A page 300 px square, [dx] and [dy] from the frame's corner. Its own span is the mean
+     * diagonal, 424 px, so the default 15 % corner tolerance is 63 px: a step of a hundred is a
+     * different page, ten a detection is the same one still settling.
+     */
+    private fun page(dx: Double = 0.0, dy: Double = 0.0): Quad =
+        Quad.rect(300.0, 300.0).translated(dx, dy)
 
-        assertTrue("one frame is not enough", !gate.observe(report()))
-        assertTrue("two frames are not enough", !gate.observe(report()))
-        assertTrue("the third fires", gate.observe(report()))
+    @Test
+    fun `the gate fires on the detection that completes a stable run`() {
+        val gate = CaptureGate(requiredRun = 3)
+
+        assertTrue("one detection is not enough", !gate.observe(report(), page(), isDetection = true))
+        assertTrue("two are not enough", !gate.observe(report(), page(), isDetection = true))
+        assertTrue("the third fires", gate.observe(report(), page(), isDetection = true))
+        assertEquals("and the page was acceptable throughout", CaptureAdvice.GOOD, gate.advice)
     }
 
     @Test
-    fun `a bad frame resets the streak`() {
-        val gate = CaptureGate(requiredFrames = 3, cooldownFrames = 0)
+    fun `the frames between two detections are not observations of their own`() {
+        val gate = CaptureGate(requiredRun = 2)
 
-        gate.observe(report())
-        gate.observe(report())
-        gate.observe(report(advice = CaptureAdvice.BLURRY))
-        assertTrue("the streak restarted", !gate.observe(report()))
-        assertTrue("(and again)", !gate.observe(report()))
-        assertTrue("only now", gate.observe(report()))
+        assertTrue(!gate.observe(report(), page(), isDetection = true))
+        // An analysis frame that asked for no outline has nothing new to say about where the page
+        // is, and must not be counted as another sighting of it: the run would then be measured in
+        // frames, ten times the unit it is supposed to be in.
+        assertTrue("a frame, not a detection", !gate.observe(report(), null, isDetection = false))
+        assertEquals(0.5, gate.readiness, 1e-9)
+        assertTrue(gate.observe(report(), page(), isDetection = true))
     }
 
     @Test
-    fun `borderline sharpness is not enough for an automatic shot`() {
-        val gate = CaptureGate(requiredFrames = 1)
-        val borderline = Quality.SHARPNESS_GOOD - 0.01
-        assertTrue("borderline rejected", !gate.observe(report(sharpness = borderline)))
-        assertTrue("clearly sharp accepted", gate.observe(report(sharpness = Quality.SHARPNESS_GOOD + 0.02)))
+    fun `a page being carried across the frame never fires`() {
+        val gate = CaptureGate(requiredRun = 3)
+
+        var fired = 0
+        for (i in 0 until 12) {
+            if (gate.observe(report(), page(dx = i * 100.0), isDetection = true)) fired++
+        }
+
+        assertEquals("moving is not settling", 0, fired)
+        assertEquals("every step restarts the run", 1.0 / 3, gate.readiness, 1e-9)
+    }
+
+    @Test
+    fun `a slow drift is one page held, a step is not`() {
+        val drifting = CaptureGate(requiredRun = 5)
+        for (i in 0 until 4) {
+            assertTrue("drifted ${i * 10} px", !drifting.observe(report(), page(dx = i * 10.0), isDetection = true))
+        }
+        // Forty pixels in all, against an anchor whose own span allows sixty-three: the run is not
+        // broken by a hand settling, which resetting against the *previous* detection would have.
+        assertTrue("held long enough", drifting.observe(report(), page(dx = 40.0), isDetection = true))
+
+        val stepped = CaptureGate(requiredRun = 3)
+        stepped.observe(report(), page(), isDetection = true)
+        stepped.observe(report(), page(), isDetection = true)
+        assertTrue("a jump is a different page", !stepped.observe(report(), page(dx = 100.0), isDetection = true))
+        assertEquals("which starts its own run", 1.0 / 3, stepped.readiness, 1e-9)
+    }
+
+    @Test
+    fun `a page that leaves resets the run`() {
+        val gate = CaptureGate(requiredRun = 3)
+        gate.observe(report(), page(), isDetection = true)
+        gate.observe(report(), page(), isDetection = true)
+
+        assertTrue("nothing found", !gate.observe(report(CaptureAdvice.NO_DOCUMENT), null, isDetection = true))
+        assertEquals("there is nothing to be steady about", 0.0, gate.readiness, 1e-9)
+        assertTrue(!gate.observe(report(), page(), isDetection = true))
+        assertTrue(!gate.observe(report(), page(), isDetection = true))
+        assertTrue("only a fresh run fires", gate.observe(report(), page(), isDetection = true))
     }
 
     @Test
     fun `the gate stays shut during its cooldown`() {
-        val gate = CaptureGate(requiredFrames = 1, cooldownFrames = 3)
+        val gate = CaptureGate(requiredRun = 1, cooldownDetections = 3)
 
-        assertTrue(gate.observe(report()))
-        assertTrue("shot one", !gate.observe(report()))
-        assertTrue("shot two", !gate.observe(report()))
-        assertTrue("shot three", !gate.observe(report()))
-        assertTrue("cooled down", gate.observe(report()))
+        assertTrue(gate.observe(report(), page(), isDetection = true))
+        assertTrue("shot one", !gate.observe(report(), page(), isDetection = true))
+        assertTrue("shot two", !gate.observe(report(), page(), isDetection = true))
+        assertTrue("shot three", !gate.observe(report(), page(), isDetection = true))
+        assertTrue("cooled down", gate.observe(report(), page(), isDetection = true))
     }
 
     @Test
-    fun `readiness fills as the streak grows`() {
-        val gate = CaptureGate(requiredFrames = 4)
+    fun `a page turned and held again is shot once more, not in a burst`() {
+        val gate = CaptureGate(requiredRun = 2, cooldownDetections = 1)
+
+        assertTrue(!gate.observe(report(), page(), isDetection = true))
+        assertTrue("the first page", gate.observe(report(), page(), isDetection = true))
+        assertTrue("cooldown", !gate.observe(report(), page(), isDetection = true))
+        assertTrue("the next page, arriving", !gate.observe(report(), page(dx = 400.0), isDetection = true))
+        assertTrue("and held", gate.observe(report(), page(dx = 400.0), isDetection = true))
+        assertTrue("once", !gate.observe(report(), page(dx = 400.0), isDetection = true))
+    }
+
+    @Test
+    fun `a page that is held still but badly lit is not shot`() {
+        for (bad in listOf(CaptureAdvice.TOO_DARK, CaptureAdvice.GLARE, CaptureAdvice.SHADOW, CaptureAdvice.BLURRY)) {
+            val gate = CaptureGate(requiredRun = 2)
+            var fired = false
+            for (i in 0 until 6) {
+                if (gate.observe(report(bad), page(), isDetection = true)) fired = true
+            }
+
+            assertTrue("$bad is not a shot", !fired)
+            // The page has not moved, so the fault is the light and not the framing: the run is
+            // complete and waiting, and the shot is taken as soon as the light comes back.
+            assertEquals(1.0, gate.readiness, 1e-9)
+            assertTrue("the light came back", gate.observe(report(), page(), isDetection = true))
+        }
+    }
+
+    @Test
+    fun `readiness is the stable run's progress toward firing`() {
+        val gate = CaptureGate(requiredRun = 4)
         assertEquals(0.0, gate.readiness, 1e-9)
-        gate.observe(report())
+        gate.observe(report(), page(), isDetection = true)
         assertEquals(0.25, gate.readiness, 1e-9)
-        gate.observe(report())
+        gate.observe(report(), page(), isDetection = true)
         assertEquals(0.5, gate.readiness, 1e-9)
+    }
+
+    @Test
+    fun `a manual shot restarts the sequence`() {
+        val gate = CaptureGate(requiredRun = 2)
+        gate.observe(report(), page(), isDetection = true)
+
+        gate.reset()
+        assertEquals(0.0, gate.readiness, 1e-9)
+        assertEquals(CaptureAdvice.NO_DOCUMENT, gate.advice)
+        assertTrue(!gate.observe(report(), page(), isDetection = true))
+        assertTrue(gate.observe(report(), page(), isDetection = true))
     }
 
     // ------------------------------------------------------------------ luma plane

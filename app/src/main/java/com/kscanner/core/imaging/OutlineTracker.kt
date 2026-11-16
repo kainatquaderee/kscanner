@@ -129,8 +129,15 @@ class OutlineTracker(
     }
 
     companion object {
-        /** Roughly seven detections a second: enough to track a hand, cheap enough to ignore. */
-        const val DEFAULT_INTERVAL_MILLIS: Long = 150
+        /**
+         * Ten detections a second. What matters is not the rate itself but the size of each step:
+         * the page moves in the gap between two detections, so the distance the outline has to
+         * cover is the page's speed times this interval. At 150 ms a hand crossing the frame moved
+         * the outline in visible strides. The competing scanner avoids that by detecting again as
+         * soon as the previous detection returns rather than on a timer — one detection in flight,
+         * no more; ten a second is as close to that as the detector's cost allows here.
+         */
+        const val DEFAULT_INTERVAL_MILLIS: Long = 100
 
         /**
          * A little below the detector's own accept threshold (0.52): live, an outline has to be
@@ -139,8 +146,14 @@ class OutlineTracker(
          */
         const val DEFAULT_MIN_CONFIDENCE: Double = 0.45
 
-        /** Eight frames or so, which reads as sliding rather than jumping. */
-        const val DEFAULT_TWEEN_MILLIS: Long = 120
+        /**
+         * Longer than [DEFAULT_INTERVAL_MILLIS], deliberately. The competing scanner's border
+         * takes 180 ms to reach a new position, which is more than the gap between its detections,
+         * so its outline is never at rest while the page is moving — it glides. A tween that
+         * finishes before the next detection arrives does the opposite: it arrives, sits still, and
+         * then sets off again, which is what makes a border read as stepping rather than following.
+         */
+        const val DEFAULT_TWEEN_MILLIS: Long = 180
 
         /** Long enough to ride out a blurred frame or a lost line, short enough to feel honest. */
         const val DEFAULT_HOLD_MILLIS: Long = 400

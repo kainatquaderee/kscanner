@@ -37,25 +37,41 @@ the flag is idle, the flag is cleared while a detection is outstanding and set a
 completes. There is also a minimum-interval timestamp field, which is never given a value in this
 build, so in practice the back-pressure — *one detection at a time* — is what paces detection.
 
-**F3 — Frames are also skipped outright.** `AutoDrawBorderHandle` carries a frame counter and
-multiplies it by a configured factor (`AutoDrawBorderHandle.java:87`), and the whole path runs on a
-thread named `workbench_find_border` (`:92`). Its constructor passes a **5 dp** value to the base
-handle — the only density-independent constant in the entire border path
-(`AutoDrawBorderHandle.java:208`, `super(DisplayUtil.m126575o(context, 5), z)`; the only other dp
-values in the package are in a debug panel). The per-corner comparison that consumes it lives in a
-Kotlin lambda that jadx could not decompile, so the *reader* of the 5 dp is inferred from position
-rather than read: it is the constant the live border path is built around.
+**F3 — Frames are also skipped outright, and the deadband is 5 dp.** `AutoDrawBorderHandle` carries a
+frame counter and skips frames until it reaches a configured factor (`:190-194`, the factor at
+`:86-88`), and the whole path runs on a thread named `workbench_find_border` (`:92`, `:117-125`). Its
+constructor passes a **5 dp** value to the base handle (`:208`,
+`super(DisplayUtil.m126575o(ApplicationHelper.f146559O8.m126379OO0o0(), 5), z)`;
+`DisplayUtil.java:167-172` is `(int) (dp * density + 0.5)`). That value is squared once into a
+threshold (`DetectPreviewBorderHandle.java:69`, `this.f26520OO0o = i * i`) and spent per corner in
+`m4469300` (`:103-111`): a stored corner is replaced by the detected one when
+`dx² + dy² > threshold`, and left alone otherwise. The deadband is therefore *snap to the new
+position when the corner moved more than 5 dp, hold the old one when it did not*. It is not
+smoothing; all of the smoothing is in the view (F4).
 
 **F4 — Nothing snaps, and nothing shimmers.** `BorderView` draws the shade as one path holding the
 whole canvas *and* the page quad with `Path.FillType.EVEN_ODD`
-(`view/BorderView.java:338`) — the hole-punch that leaves only the page undimmed. The border is a
-`STROKE` of width `2`, divided by the view's minimum scale at draw time (`:270`, `:360`), so it stays
-two density-independent pixels wide however the preview is scaled. It repaints on a fixed 16 ms
-cadence (`:261`, `:389` `postInvalidateDelayed(16L)`) and moves through a `BorderScroller` tween
-rather than by assignment.
+(`view/BorderView.java:336-338`) — the hole-punch that leaves only the page undimmed. The border is a
+`STROKE` of width `2` dp (`:366-368`), divided by the view's minimum scale at draw time (`:358-360`),
+so it stays two density-independent pixels wide however the preview is scaled. It repaints on a fixed
+16 ms cadence (`:388-390`, `postInvalidateDelayed(16L)`) and moves through a `BorderScroller` tween
+rather than by assignment: the scene passes `mo40585o8O()` as that tween's duration
+(`capture/core/BaseCaptureScene.java:1071`, `:1073`), which is
+`DocDirectionUtilKt.ROTATE_ANCHOR_180` — **180 ms** (`:1505-1507`; the constant itself at
+`scanner/DocDirectionUtilKt.java:22`) — interpolated linearly (`BorderView.java:244`, `:205-215`). The
+first outline of a run, or one whose length changed, is assigned outright instead (`:164-172`), so
+the tween only starts once there is a previous position to move away from.
 
-**F5 — The border colour is teal.** `BorderView.java:271` sets `-15090532`, which is `0xFF19BC9C` —
-a green-teal, not the system accent and not white.
+That 180 ms is the number that matters most here, because it is *longer than the gap between
+detections*. Their outline is therefore never at rest while the page is moving: it glides from where
+it is towards wherever the latest detection put it, and the next detection arrives before it arrives.
+
+**F5 — The border colour is teal, and amber when a corner leaves the frame.**
+`BorderView.java:277` (and again at `:295`) sets `-15090532`, which is `0xFF19BC9C` — a green-teal,
+not the system accent and not white. When a corner is outside the frame the same paint is set to
+`-2142917`, `0xFFDF4D3B`, an amber (`:292-293`). The status that selects it comes from
+`BaseCaptureScene.java:1063`, `ScannerUtils.overBoundary(...) ? OUT_SIDE : IN_SIDE`
+(`ScannerUtils.java:1106-1118`: any corner outside `[0,w]×[0,h]`).
 
 **F6 — The border is not gated on the automatic shutter.** The border path is fed by the same
 preview data the auto-capture state machine consumes, and draws regardless of which auto-capture

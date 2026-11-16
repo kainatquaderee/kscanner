@@ -8,6 +8,21 @@ Versions before v1.4.0 — v1.0.0 through v1.3.0 — shipped before each release
 repository. Their APKs are on the Releases page; we give no summary of them here rather than an
 invented one.
 
+## v1.6.6 — 2026-11-16
+
+**Fixed**
+
+- **A photographed page is cropped whole, not to the piece of it that was easiest to find.** The
+  detector's answer was a *fragment* of the page whenever the lighting ran across it or the sheet ran
+  off the edge of the camera: 0.327 of the frame delivered for a sheet covering 0.998, 0.287 for the
+  same sheet under a light gradient, 0.228 where the desk was as bright as the paper. The crop is now
+  decided in three steps — a first answer covering 60 % of the frame stands; otherwise the frame's own
+  paper level decides whether the sheet runs past the view, in which case the picture is kept whole;
+  otherwise a flat-fielded second look is taken only when it grows the answer by more than a
+  hundredth of the frame and stays below 98 % of it. Across nineteen measured fixtures the mean area
+  error falls from 0.213 to 0.117 and no row gets worse.
+- [Full notes](docs/releases/v1.6.6.md)
+
 ## v1.6.5 — 2026-11-16
 
 **Fixed**
